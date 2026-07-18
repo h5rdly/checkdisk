@@ -1,0 +1,22 @@
+# checkdisk
+
+A self-contained, pure-Python NTFS repair tool — the parts of chkdsk `/f` that matter for a crashed volume (dangling dirents, torn indexes, 
+lost files, torn truncates, `$Bitmap`, `$Secure`, the USN journal). 
+
+`checkdisk` uses a native read/write engine that parses and rewrites on-disk NTFS structures directly, with multi-sector fixups and plan-then-commit 
+atomicity. 
+
+## Quick start
+
+`checkdisk` works on the raw (unmounted) device or an image file — never through
+a mount:
+
+```sh
+sudo umount /mnt/point                       # get off the volume first
+sudo setfacl -m u:$USER:rw /dev/sdXN         # or run the tool with sudo
+python checkdisk.py /f /dev/sdXN             # dry run: reports, writes nothing
+python checkdisk.py /f /dev/sdXN --really    # repair (each fix re-verified)
+python checkdisk.py /f /dev/sdXN             # confirm: expect 0 remaining
+```
+
+`/r` adds the full surface read.
