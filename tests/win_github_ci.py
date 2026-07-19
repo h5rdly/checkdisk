@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 '''Native Windows chkdsk oracle — the QEMU cross-check without the VM.
 
 The portable suite (tests.py, ci_tests.py) verifies checkdisk.py with its own
@@ -165,8 +164,13 @@ class WindowsChkdskOracle(unittest.TestCase):
 
     def _verdict(self, path: str) -> tuple[int, str]:
         code, out = _chkdsk(path)
-        # exit 3 = "could not check" is an environment failure, not a verdict.
-        self.assertNotEqual(code, 3, f'chkdsk could not run:\n{out}')
+        # chkdsk's exit 3 is overloaded: "could not check the volume" AND
+        # "errors found but /f not given" both return 3 — only the output tells
+        # them apart. In read-only mode a flagged volume legitimately exits 3
+        # ("Errors found. CHKDSK cannot continue in read-only mode."), so gate
+        # on the could-not-run marker instead of the code.
+        self.assertNotIn('Cannot open volume', out,
+                         f'chkdsk could not run:\n{out}')
         return code, out
 
 

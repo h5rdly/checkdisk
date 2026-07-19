@@ -4,11 +4,12 @@ The Windows chkdsk oracle needs each fabricated volume presented to Windows as a
 lettered drive. PowerShell can do it (Mount-DiskImage), but Get-Disk enumerates
 the CIM store asynchronously and races a freshly attached image
 (CmdletizationQuery_NotFound). virtdisk.dll avoids that: OpenVirtualDisk +
-AttachVirtualDisk attach the image and GetVirtualDiskPhysicalPath returns
-\\.\PhysicalDriveN straight from the handle (no CIM). AttachVirtualDisk leaves
-the disk OFFLINE under Windows Server's SAN policy, so we clear its OFFLINE
-attribute to surface the volume, match it by disk extents, and give it a letter
-(reusing an automount letter if one appeared, else assigning a free one).
+AttachVirtualDisk attach the image and GetVirtualDiskPhysicalPath returns the
+physical drive path (PhysicalDriveN) straight from the handle — no CIM anywhere.
+AttachVirtualDisk leaves the disk OFFLINE under Windows Server's SAN policy, so
+we clear its OFFLINE attribute to surface the volume, match it by disk extents,
+and give it a letter (reusing an automount letter if one appeared, else
+assigning a free one).
 
 The attach is read-write (required to online the disk), but the oracle only ever
 runs read-only chkdsk, so the volume bytes are never modified.
@@ -150,7 +151,7 @@ def _online_disk(k, disk_number: int) -> None:
        under Windows Server's default SAN policy — no partition/volume appears
        until it is onlined. Best-effort: needs write access to the disk device
        (hence the read-write attach), then a property refresh to re-read it.'''
-    h = k.CreateFileW(rf'\\.\PhysicalDrive{disk_number}', _GENERIC_RW, 0x3,
+    h = k.CreateFileW(f'\\\\.\\PhysicalDrive{disk_number}', _GENERIC_RW, 0x3,
                       None, 3, 0, None)
     if h == _INVALID_HANDLE:
         return

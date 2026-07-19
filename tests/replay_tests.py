@@ -33,7 +33,6 @@ sys.path.insert(0, os.path.dirname(_here))   # repo root (checkdisk / replay)
 import checkdisk          # noqa: E402
 import replay             # noqa: E402
 
-
 FIXTURE = os.path.join(_here, 'fixtures', 'dirty-big-win.img.gz')
 
 
@@ -108,7 +107,9 @@ class ReplayChkdskOracle(unittest.TestCase):
         self.addCleanup(lambda: os.path.exists(img) and os.unlink(img))
         replay.replay(img, really=True)
         code, out = win_github_ci._chkdsk(img)
-        self.assertNotEqual(code, 3, f'chkdsk could not run:\n{out}')
+        # (exit 3 doubles as "could not check" — the output disambiguates)
+        self.assertNotIn('Cannot open volume', out,
+                         f'chkdsk could not run:\n{out}')
         self.assertEqual(code, 0,
                          f'chkdsk should find the replayed volume clean\n{out}')
 
