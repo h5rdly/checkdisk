@@ -20,8 +20,8 @@ import unittest
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)                    # tests/ (sibling tests)
 sys.path.insert(0, os.path.dirname(_here))   # repo root (checkdisk)
-import checkdisk as ndf  # noqa: E402
-import format as FMT     # noqa: E402
+import checkdisk         # noqa: E402
+import format            # noqa: E402
 
 IMAGE_BYTES = 64 * 1024 * 1024
 
@@ -196,15 +196,15 @@ def tear_index_block(path: str, needle: str) -> int:
 
 class NtfsImage:
     def __init__(self, size: int = IMAGE_BYTES) -> None:
-        fd, self.path = tempfile.mkstemp(suffix='.ntfs.img', prefix='ndf-test-')
+        fd, self.path = tempfile.mkstemp(suffix='.ntfs.img', prefix='checkdisk-test-')
         os.close(fd)
-        FMT.format_volume(self.path, size_mib=size // (1024 * 1024))
+        format.format_volume(self.path, size_mib=size // (1024 * 1024))
 
     def populate(self, files: dict[str, bytes], dirs: tuple[str, ...] = ()) -> None:
-        FMT.populate(self.path, files, dirs)
+        format.populate(self.path, files, dirs)
 
     def list_dir(self, rel: str) -> list[str]:
-        with ndf.RawVolume(self.path) as v:
+        with checkdisk.RawVolume(self.path) as v:
             return sorted(e['name'] for e in v.scan_dir('/' + rel.strip('/'))
                           if e['status'] != 'dir-self')
 
@@ -222,7 +222,7 @@ def patch_stream(path: str, rec_no: int, attr_type: int, name: str,
        through record surgery, non-resident through the runlist. The raw
        corruption fabricator that replaces driver-side attribute I/O.'''
     name_u16 = name.encode('utf-16-le') if name else None
-    with ndf.RawVolumeRW(path) as v:
+    with checkdisk.RawVolumeRW(path) as v:
         size, runs = v._stream_runs(rec_no, attr_type, name_u16)
         if runs is None:                                  # resident
             for frozen, a, _l in v._record_attrs(rec_no):
@@ -252,9 +252,9 @@ def patch_stream(path: str, rec_no: int, attr_type: int, name: str,
 
 def add_named_data(path: str, rec_no: int, name: str, value: bytes) -> None:
     '''Add a named resident $DATA stream to a record (fabrication helper).'''
-    with ndf.RawVolumeRW(path) as v:
+    with checkdisk.RawVolumeRW(path) as v:
         rec = v._load_record(rec_no)
-        v._add_attr(rec, ndf.AT_DATA, name.encode('utf-16-le'),
+        v._add_attr(rec, checkdisk.AT_DATA, name.encode('utf-16-le'),
                     resident=True, value=value)
         v.write_record(rec_no, rec)
 
@@ -267,7 +267,7 @@ class MountCheckTests(unittest.TestCase):
        loop-device paths are exercised without root, FUSE, or mkfs.'''
 
     def setUp(self) -> None:
-        self.tmp = tempfile.mkdtemp(prefix='ndf-mntchk-')
+        self.tmp = tempfile.mkdtemp(prefix='checkdisk-mntchk-')
         self.addCleanup(shutil.rmtree, self.tmp)
         self.image = os.path.join(self.tmp, 'disk.img')
         open(self.image, 'wb').close()
@@ -287,13 +287,13 @@ class MountCheckTests(unittest.TestCase):
     def test_direct_source_refused(self) -> None:
         mounts, sysb = self._fake([f'{self.image} /mnt/t fuseblk rw 0 0\n'], {})
         with self.assertRaises(SystemExit):
-            ndf.assert_not_mounted(self.image, mounts=mounts, sys_block=sysb)
+            checkdisk.assert_not_mounted(self.image, mounts=mounts, sys_block=sysb)
 
     def test_loop_mounted_image_refused(self) -> None:
         mounts, sysb = self._fake(['/dev/loop7 /mnt/t ntfs3 rw 0 0\n'],
                                   {'loop7': self.image})
         with self.assertRaises(SystemExit):
-            ndf.assert_not_mounted(self.image, mounts=mounts, sys_block=sysb)
+            checkdisk.assert_not_mounted(self.image, mounts=mounts, sys_block=sysb)
 
     def test_loop_partition_mounted_image_refused(self) -> None:
         # /dev/loop7p1: sysfs nests the partition node under the whole device,
@@ -303,7 +303,7 @@ class MountCheckTests(unittest.TestCase):
         os.makedirs(os.path.join(sysb, 'loop7', 'loop7p1'))
         os.symlink(os.path.join('loop7', 'loop7p1'), os.path.join(sysb, 'loop7p1'))
         with self.assertRaises(SystemExit):
-            ndf.assert_not_mounted(self.image, mounts=mounts, sys_block=sysb)
+            checkdisk.assert_not_mounted(self.image, mounts=mounts, sys_block=sysb)
 
     def test_unrelated_mounts_pass(self) -> None:
         other = os.path.join(self.tmp, 'other.img')
@@ -312,7 +312,7 @@ class MountCheckTests(unittest.TestCase):
                                    '/dev/sda1 / ext4 rw 0 0\n',
                                    'tmpfs /tmp tmpfs rw 0 0\n'],
                                   {'loop3': other})
-        ndf.assert_not_mounted(self.image, mounts=mounts, sys_block=sysb)  # no raise
+        checkdisk.assert_not_mounted(self.image, mounts=mounts, sys_block=sysb)  # no raise
 
 
 def usn_v2(usn: int, name: str = 'a.txt') -> bytes:
@@ -339,7 +339,7 @@ class UsnWalkTests(unittest.TestCase):
 
     @staticmethod
     def _walk(blob: bytes, start: int = 0):
-        return ndf._walk_usn_records(
+        return checkdisk._walk_usn_records(
             lambda pos, count: blob[pos:pos + count], start, len(blob))
 
     def test_valid_stream(self) -> None:
@@ -439,37 +439,37 @@ class MappingPairsCodecTests(unittest.TestCase):
                 runs.append((lcn, length))
                 lcn += length
                 total += length
-            mp = ndf._encode_mapping_pairs(runs)
+            mp = checkdisk._encode_mapping_pairs(runs)
             rec = self._decode(mp)
             struct.pack_into('<q', rec, 24, total - 1)     # highest_vcn
             struct.pack_into('<qqq', rec, 40, total * 4096, total * 4096, total * 4096)
-            prob, phantom, decoded = ndf._check_mapping_pairs(rec, 0, len(rec), 1 << 40)
+            prob, phantom, decoded = checkdisk._check_mapping_pairs(rec, 0, len(rec), 1 << 40)
             self.assertIsNone(prob, f'{runs} -> {prob}')
             self.assertEqual([(l, n) for l, n, _v in decoded], runs)
 
     def test_minbytes(self) -> None:
-        self.assertEqual(ndf._min_bytes_signed(-1), b'\xff')
-        self.assertEqual(ndf._min_bytes_signed(127), b'\x7f')
-        self.assertEqual(ndf._min_bytes_signed(128), b'\x80\x00')
-        self.assertEqual(ndf._min_bytes_signed(-128), b'\x80')
-        self.assertEqual(ndf._min_bytes_signed(-129), b'\x7f\xff')
+        self.assertEqual(checkdisk._min_bytes_signed(-1), b'\xff')
+        self.assertEqual(checkdisk._min_bytes_signed(127), b'\x7f')
+        self.assertEqual(checkdisk._min_bytes_signed(128), b'\x80\x00')
+        self.assertEqual(checkdisk._min_bytes_signed(-128), b'\x80')
+        self.assertEqual(checkdisk._min_bytes_signed(-129), b'\x7f\xff')
 
     def test_length_128_encodes_as_two_bytes(self) -> None:
         '''Run lengths are signed varints: 128 in a single byte reads back as
            -128 (Windows and every driver sign-extend the top byte), so it must
            encode as 80 00 — and the decoder must flag the one-byte form.'''
-        mp = ndf._encode_mapping_pairs([(3688, 128)])
+        mp = checkdisk._encode_mapping_pairs([(3688, 128)])
         self.assertEqual(mp[0] & 0xF, 2)               # two length bytes
         self.assertEqual(mp[1:3], b'\x80\x00')
         rec = self._decode(mp)
         struct.pack_into('<q', rec, 24, 127)           # highest_vcn
-        prob, _, decoded = ndf._check_mapping_pairs(rec, 0, len(rec), 1 << 40)
+        prob, _, decoded = checkdisk._check_mapping_pairs(rec, 0, len(rec), 1 << 40)
         self.assertIsNone(prob)
         self.assertEqual([(l, n) for l, n, _v in decoded], [(3688, 128)])
         bad = bytes([0x21, 0x80]) + mp[3:]             # the invalid old form
         rec = self._decode(bad)
         struct.pack_into('<q', rec, 24, 127)
-        prob, _, _ = ndf._check_mapping_pairs(rec, 0, len(rec), 1 << 40)
+        prob, _, _ = checkdisk._check_mapping_pairs(rec, 0, len(rec), 1 << 40)
         self.assertIn('non-positive run length', prob or '')
 
 
@@ -481,7 +481,7 @@ class UpcaseTableTests(unittest.TestCase):
        system volume.'''
 
     def test_bit_identical_to_windows(self) -> None:
-        self.assertEqual(hashlib.md5(FMT.build_upcase()).hexdigest(),
+        self.assertEqual(hashlib.md5(format.build_upcase()).hexdigest(),
                          '7ff498a44e45e77374cc7c962b1b92f2')
 
 
@@ -496,12 +496,12 @@ class FixupSealTests(unittest.TestCase):
         struct.pack_into('<HH', logical, 4, 48, 3)   # usa_ofs, usa_count
         struct.pack_into('<H', logical, 48, 41)      # current USN
         sealed = bytearray(logical)
-        ndf._seal_fixups(sealed)
+        checkdisk._seal_fixups(sealed)
         self.assertEqual(struct.unpack_from('<H', sealed, 48)[0], 42)
         for end in (512, 1024):                      # sector ends now carry USN
             self.assertEqual(struct.unpack_from('<H', sealed, end - 2)[0], 42)
         unfixed = bytearray(sealed)
-        self.assertTrue(ndf._apply_fixups(unfixed))
+        self.assertTrue(checkdisk._apply_fixups(unfixed))
         self.assertEqual(unfixed[54:], logical[54:], 'payload must round-trip')
         self.assertEqual(unfixed[:48], logical[:48])
 
@@ -522,17 +522,17 @@ class SurfaceScanTests(unittest.TestCase):
 
     def test_clean_device(self) -> None:
         self.assertEqual(
-            ndf._surface_scan(self._fake_pread(set()), 500 * self.CSZ, self.CSZ), [])
+            checkdisk._surface_scan(self._fake_pread(set()), 500 * self.CSZ, self.CSZ), [])
 
     def test_bisect_finds_exact_bad_clusters(self) -> None:
         bad = {5, 6, 130, 499}
         self.assertEqual(
-            ndf._surface_scan(self._fake_pread(bad), 500 * self.CSZ, self.CSZ),
+            checkdisk._surface_scan(self._fake_pread(bad), 500 * self.CSZ, self.CSZ),
             sorted(bad))
 
     def test_premature_eof_raises(self) -> None:
-        with self.assertRaises(ndf.NtfsError):
-            ndf._surface_scan(lambda pos, count: b'', 10 * self.CSZ, self.CSZ)
+        with self.assertRaises(checkdisk.NtfsError):
+            checkdisk._surface_scan(lambda pos, count: b'', 10 * self.CSZ, self.CSZ)
 
 
 class SecurityHashTests(unittest.TestCase):
@@ -540,15 +540,15 @@ class SecurityHashTests(unittest.TestCase):
        taken from real on-disk $SDS entries.'''
 
     def test_known_vectors(self) -> None:
-        self.assertEqual(ndf._security_hash(b''), 0)
+        self.assertEqual(checkdisk._security_hash(b''), 0)
         # hashes of the two descriptors format.py writes, as found in the
         # $SDS entry headers of chkdsk-accepted volumes
-        sds, entries = FMT.build_sds()
+        sds, entries = format.build_sds()
         for sid_id, (h, off, length) in entries.items():
             stored = struct.unpack_from('<I', sds, off)[0]
             self.assertEqual(stored, h, hex(sid_id))
             body = sds[off + 20:off + length]
-            self.assertEqual(ndf._security_hash(bytes(body)), h)
+            self.assertEqual(checkdisk._security_hash(bytes(body)), h)
 
 
 class NtfsDirentFixTests(unittest.TestCase):
@@ -560,7 +560,7 @@ class NtfsDirentFixTests(unittest.TestCase):
 
     def test_scan_and_inspect_healthy(self) -> None:
         self.img.populate({'repro/keep.py': b'ok\n'})
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             entries = [e for e in vol.scan_dir('/repro') if e['status'] != 'dir-self']
             self.assertTrue(entries and all(e['status'] == 'ok' for e in entries))
             verdict = vol.classify_dirent('/repro', 'keep.py')
@@ -572,9 +572,9 @@ class NtfsDirentFixTests(unittest.TestCase):
         self.img.populate({'repro/keep.py': b'ok\n', 'repro/gone.py': b'x\n'})
         corrupt_record_free(self.img.path, 'gone.py')
 
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             self.assertEqual(vol.classify_dirent('/repro', 'gone.py')['state'], 'record-free')
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             vol.remove_dirent('/repro', 'gone.py', really=True)
 
         self.assertEqual(self.img.list_dir('repro'), ['keep.py'])
@@ -585,12 +585,12 @@ class NtfsDirentFixTests(unittest.TestCase):
         self.img.populate({'repro/keep.py': b'ok\n', 'repro/orphan.py': b'y' * 8192})
         corrupt_orphan(self.img.path, 'orphan.py')
 
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             verdict = vol.classify_dirent('/repro', 'orphan.py')
         self.assertEqual(verdict['state'], 'orphan')
         record_no = verdict['dirent_record']
 
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             vol.purge_orphan('/repro', 'orphan.py', really=True)
 
         self.assertEqual(self.img.list_dir('repro'), ['keep.py'])
@@ -606,11 +606,11 @@ class NtfsDirentFixTests(unittest.TestCase):
         corrupt_record_reused(self.img.path, 'reusedme.dat', 'squatter.dat')
         record_no = _find_file_record(self.img.path, 'squatter.dat')[0]
 
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             verdict = vol.classify_dirent('/repro', 'reusedme.dat')
         self.assertEqual(verdict['state'], 'record-reused')
 
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             with self.assertRaises(SystemExit):
                 vol.purge_orphan('/repro', 'reusedme.dat', really=True)
             vol.remove_dirent('/repro', 'reusedme.dat', really=True)
@@ -626,14 +626,14 @@ class NtfsDirentFixTests(unittest.TestCase):
         self.img.populate({'repro/keep.py': b'ok\n', 'repro/victimme.dat': b'v\n'})
         corrupt_cross_link(self.img.path, 'victimme.dat', 'squatter.dat')
 
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             entries = {e['name']: e for e in vol.scan_dir('/repro')}
             self.assertIn('cross-linked', entries['victimme.dat']['status'])
             verdict = vol.classify_dirent('/repro', 'victimme.dat')
         self.assertEqual(verdict['state'], 'cross-linked')
         record_no = verdict['dirent_record']
 
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             with self.assertRaises(SystemExit):
                 vol.purge_orphan('/repro', 'victimme.dat', really=True)
             vol.remove_dirent('/repro', 'victimme.dat', really=True)
@@ -649,10 +649,10 @@ class NtfsDirentFixTests(unittest.TestCase):
     def test_dry_run_is_noop(self) -> None:
         self.img.populate({'repro/keep.py': b'ok\n', 'repro/orphan.py': b'y' * 4096})
         corrupt_orphan(self.img.path, 'orphan.py')
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             vol.purge_orphan('/repro', 'orphan.py', really=False)
         # semantic no-op: entry still present and still dangling, record in use
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             self.assertEqual(vol.classify_dirent('/repro', 'orphan.py')['state'],
                              'orphan')
 
@@ -666,17 +666,17 @@ class NtfsDirentFixTests(unittest.TestCase):
         torn = tear_index_block(self.img.path, 'bigfile_')
         self.assertGreater(torn, 0)
 
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             mft_no = vol._resolve('/bigdir')
             self.assertFalse(vol.probe_dir('/bigdir')['readable'], 'index should read as torn')
             census = {c['name'] for c in vol.children_from_mft(mft_no)['children']}
         self.assertEqual(census, set(expected), 'MFT census must recover every name')
 
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             result = vol.rebuild_dir('/bigdir')
         self.assertEqual(result['added'], len(expected))
 
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             verify = vol.probe_dir('/bigdir')
         self.assertTrue(verify['readable'])
         self.assertFalse([e for e in verify['entries'] if e['status'] != 'ok'])
@@ -688,7 +688,7 @@ class NtfsDirentFixTests(unittest.TestCase):
         self.img.populate({'repro/keep.py': b'ok\n', 'repro/stale.py': b'x\n'})
         corrupt_parent_seq(self.img.path, 'stale.py')
 
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             census = vol.children_from_mft(vol._resolve('/repro'))
 
         self.assertEqual({c['name'] for c in census['children']}, {'keep.py'})
@@ -698,7 +698,7 @@ class NtfsDirentFixTests(unittest.TestCase):
 
     def test_upcase_names_equal(self) -> None:
         self.img.populate({'repro/keep.py': b'ok\n'})
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             self.assertTrue(vol.names_equal('MiXeD.DaT', 'mixed.dat'))
             self.assertFalse(vol.names_equal('a.dat', 'b.dat'))
             self.assertFalse(vol.names_equal('short.py', 'longer.py'))
@@ -707,7 +707,7 @@ class NtfsDirentFixTests(unittest.TestCase):
         name = 'órphän.py'
         self.img.populate({'repro/keep.py': b'ok\n', f'repro/{name}': b'y' * 4096})
         corrupt_orphan(self.img.path, name)
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             self.assertEqual(vol.classify_dirent('/repro', name)['state'], 'orphan')
 
     def test_rebuild_refuses_healthy_without_force(self) -> None:
@@ -780,26 +780,26 @@ class NtfsDirentFixTests(unittest.TestCase):
         proc = self._cli('/f', self.img.path)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         # the repaired record now describes a consistent, empty stream
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             e = next(x for x in v.scan_dir('/repro') if x['name'] == 'fat.bin')
-            self.assertEqual(v._attr_value(e['record'], ndf.AT_DATA, None), b'')
+            self.assertEqual(v._attr_value(e['record'], checkdisk.AT_DATA, None), b'')
 
     # -- stage 5: $Bitmap reconciliation --
 
     def _patch_bitmap_byte(self, offset: int, value: int) -> None:
-        patch_stream(self.img.path, ndf.FILE_BITMAP, ndf.AT_DATA, '',
+        patch_stream(self.img.path, checkdisk.FILE_BITMAP, checkdisk.AT_DATA, '',
                      offset, bytes([value]))
 
     def test_bitmap_audit_and_fix(self) -> None:
         self.img.populate({'repro/keep.py': b'ok\n'})
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             base = vol.cluster_audit()
         self.assertEqual((base['extra'], base['missing'], base['failures']),
                          (0, 0, []), 'fresh volume must audit clean')
 
         self._patch_bitmap_byte(1200, 0xFF)  # mark free clusters used -> extra
         self._patch_bitmap_byte(0, 0x00)     # mark boot/system free -> missing
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             audit = vol.cluster_audit()
         self.assertGreater(audit['extra'], 0)
         self.assertGreater(audit['missing'], 0)
@@ -807,7 +807,7 @@ class NtfsDirentFixTests(unittest.TestCase):
         proc = self._cli('/f', self.img.path, '--really')
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn('$Bitmap rewritten and verified', proc.stdout)
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             audit = vol.cluster_audit()
         self.assertEqual((audit['extra'], audit['missing']), (0, 0))
         self.assertEqual(self.img.list_dir('repro'), ['keep.py'])
@@ -816,7 +816,7 @@ class NtfsDirentFixTests(unittest.TestCase):
 
     def test_backup_command(self) -> None:
         self.img.populate({'repro/keep.py': b'ok\n'})
-        out = tempfile.mkdtemp(prefix='ndf-bak-')
+        out = tempfile.mkdtemp(prefix='checkdisk-bak-')
         self.addCleanup(shutil.rmtree, out)
         proc = self._cli('backup', self.img.path, out, '/repro')
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
@@ -833,7 +833,7 @@ class NtfsDirentFixTests(unittest.TestCase):
         '''A $UsnJrnl lookalike at /usnlab: $Max + $J named streams '''
 
         self.img.populate({'usnlab': b''})
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             rec_no = v._resolve('/usnlab')
         maxblob = struct.pack('<QQQQ', 32 * 1024 * 1024, 8 * 1024 * 1024, jid, 0)
         add_named_data(self.img.path, rec_no, '$J', jstream)
@@ -841,25 +841,25 @@ class NtfsDirentFixTests(unittest.TestCase):
 
     def test_usn_check_and_reset(self) -> None:
         self._make_usn_file(usn_stream('a.txt', 'b.txt'))
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             info = vol.usn_check(path='/usnlab')
         self.assertTrue(info['present'])
         self.assertEqual((info['records'], info['problems']), (2, []))
         self.assertEqual(info['journal_id'], 0xABCDEF)
 
         # corrupt the first record's Usn field -> finding
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             rec_no = v._resolve('/usnlab')
-        patch_stream(self.img.path, rec_no, ndf.AT_DATA, '$J',
+        patch_stream(self.img.path, rec_no, checkdisk.AT_DATA, '$J',
                      24, struct.pack('<q', 4242))
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             info = vol.usn_check(path='/usnlab')
         self.assertTrue(any('claims usn 4242' in p for p in info['problems']))
 
         # reset: $J truncated to 0, $Max restamped with a fresh id
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             new_id = vol.usn_reset(path='/usnlab')
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             info = vol.usn_check(path='/usnlab')
         self.assertEqual((info['records'], info['problems'], info['next_usn']),
                          (0, [], 0))
@@ -876,12 +876,12 @@ class NtfsDirentFixTests(unittest.TestCase):
 
     def _patch_secure_attr(self, attr_type: int, name: str, offset: int,
                            blob: bytes) -> None:
-        patch_stream(self.img.path, ndf.FILE_SECURE, attr_type, name,
+        patch_stream(self.img.path, checkdisk.FILE_SECURE, attr_type, name,
                      offset, blob)
 
     def test_secure_healthy(self) -> None:
         self.img.populate({'repro/keep.py': b'ok\n'})
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             chk = vol.secure_check()
         self.assertTrue(chk['present'])
         self.assertGreater(chk['descriptors'], 0)
@@ -891,19 +891,19 @@ class NtfsDirentFixTests(unittest.TestCase):
 
     def test_secure_mirror_repair(self) -> None:
         self.img.populate({'repro/keep.py': b'ok\n'})
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             chk = vol.secure_check()
         sid, (_h, off, length) = sorted(chk['sds_entries'].items())[0]
         # flip one byte inside the primary copy's descriptor body
-        self._patch_secure_attr(ndf.AT_DATA, '$SDS', off + 24, b'\xEE')
+        self._patch_secure_attr(checkdisk.AT_DATA, '$SDS', off + 24, b'\xEE')
 
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             chk = vol.secure_check()
         self.assertEqual([f[2] for f in chk['mirror_fixes']], ['mirror'],
                          'the intact mirror side must be chosen as the source')
         proc = self._cli('secure', self.img.path, '--really')
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             chk = vol.secure_check()
         self.assertEqual(chk['mirror_fixes'], [])
         self.assertEqual(chk['problems'], [])
@@ -911,28 +911,28 @@ class NtfsDirentFixTests(unittest.TestCase):
     def test_secure_index_rebuild(self) -> None:
         self.img.populate({'repro/keep.py': b'ok\n'})
         # corrupt the security_id inside the first $SII root entry's data
-        with ndf.RawVolume(self.img.path) as vol:
-            root = vol._read_whole_attr(ndf.FILE_SECURE, ndf.AT_INDEX_ROOT,
+        with checkdisk.RawVolume(self.img.path) as vol:
+            root = vol._read_whole_attr(checkdisk.FILE_SECURE, checkdisk.AT_INDEX_ROOT,
                                         '$SII'.encode('utf-16-le'), 4)
         entries_ofs = struct.unpack_from('<I', root, 16)[0]
         entry = 16 + entries_ofs
         data_ofs = struct.unpack_from('<H', root, entry)[0]
-        self._patch_secure_attr(ndf.AT_INDEX_ROOT, '$SII',
+        self._patch_secure_attr(checkdisk.AT_INDEX_ROOT, '$SII',
                                 entry + data_ofs + 4, struct.pack('<I', 0xDEAD))
 
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             chk = vol.secure_check()
         self.assertTrue(chk['index_problems'], chk)
         proc = self._cli('secure', self.img.path, '--really')
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn('rebuilt from $SDS', proc.stdout)
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             self.assertEqual(vol.secure_check()['index_problems'], [])
             # the rebuilt roots parse back entry-for-entry against $SDS
             for nm, kfmt in (('$SII', '<I'), ('$SDH', '<II')):
                 bn = nm.encode('utf-16-le')
-                root = vol._read_whole_attr(ndf.FILE_SECURE, ndf.AT_INDEX_ROOT, bn, 4)
-                idx, probs = ndf._view_index_entries(
+                root = vol._read_whole_attr(checkdisk.FILE_SECURE, checkdisk.AT_INDEX_ROOT, bn, 4)
+                idx, probs = checkdisk._view_index_entries(
                     root, None, None, nm,
                     key_fn=lambda k, f=kfmt: struct.unpack_from(f, k))
                 self.assertEqual(probs, [])
@@ -946,16 +946,16 @@ class NtfsDirentFixTests(unittest.TestCase):
         self.img.populate({'d/a.txt': b'x'})
         synth = {sid: ((sid * 2654435761) & 0xffffffff, sid * 20, 20)
                  for sid in range(256, 296)}               # 40 descriptors
-        with ndf.RawVolumeRW(self.img.path) as v:
+        with checkdisk.RawVolumeRW(self.img.path) as v:
             assert v.rebuild_secure_indexes(synth)['added'] == 80   # 40 $SII + 40 $SDH
         for nm, kfmt in (('$SII', '<I'), ('$SDH', '<II')):
             bn = nm.encode('utf-16-le')
-            with ndf.RawVolume(self.img.path) as v:
-                root = v._read_whole_attr(ndf.FILE_SECURE, ndf.AT_INDEX_ROOT, bn, 4)
-                alloc = v._read_whole_attr(ndf.FILE_SECURE, ndf.AT_INDEX_ALLOCATION, bn, 4)
-                bmp = v._read_whole_attr(ndf.FILE_SECURE, ndf.AT_BITMAP, bn, 4)
+            with checkdisk.RawVolume(self.img.path) as v:
+                root = v._read_whole_attr(checkdisk.FILE_SECURE, checkdisk.AT_INDEX_ROOT, bn, 4)
+                alloc = v._read_whole_attr(checkdisk.FILE_SECURE, checkdisk.AT_INDEX_ALLOCATION, bn, 4)
+                bmp = v._read_whole_attr(checkdisk.FILE_SECURE, checkdisk.AT_BITMAP, bn, 4)
             assert alloc, f'{nm} should have become a single-block large index'
-            idx, probs = ndf._view_index_entries(
+            idx, probs = checkdisk._view_index_entries(
                 root, alloc, bmp, nm,
                 key_fn=lambda k, f=kfmt: struct.unpack_from(f, k))
             assert probs == [], (nm, probs)
@@ -970,18 +970,18 @@ class NtfsDirentFixTests(unittest.TestCase):
         self.img.populate({'d/a.txt': b'x'})
         synth = {sid: ((sid * 2654435761) & 0xffffffff, sid * 20, 20)
                  for sid in range(256, 456)}               # 200 descriptors
-        with ndf.RawVolumeRW(self.img.path) as v:
+        with checkdisk.RawVolumeRW(self.img.path) as v:
             assert v.rebuild_secure_indexes(synth)['added'] == 400
         for nm, kfmt, id_of in (('$SII', '<I', lambda k: struct.unpack_from('<I', k)[0]),
                                 ('$SDH', '<II', lambda k: struct.unpack_from('<II', k)[1])):
             bn = nm.encode('utf-16-le')
-            with ndf.RawVolume(self.img.path) as v:
-                root = v._read_whole_attr(ndf.FILE_SECURE, ndf.AT_INDEX_ROOT, bn, 4)
-                alloc = v._read_whole_attr(ndf.FILE_SECURE, ndf.AT_INDEX_ALLOCATION, bn, 4)
-                bmp = v._read_whole_attr(ndf.FILE_SECURE, ndf.AT_BITMAP, bn, 4)
+            with checkdisk.RawVolume(self.img.path) as v:
+                root = v._read_whole_attr(checkdisk.FILE_SECURE, checkdisk.AT_INDEX_ROOT, bn, 4)
+                alloc = v._read_whole_attr(checkdisk.FILE_SECURE, checkdisk.AT_INDEX_ALLOCATION, bn, 4)
+                bmp = v._read_whole_attr(checkdisk.FILE_SECURE, checkdisk.AT_BITMAP, bn, 4)
             bs = struct.unpack_from('<I', root, 8)[0]
             assert len(alloc) > bs, f'{nm} should span more than one INDX block'
-            idx, probs = ndf._view_index_entries(
+            idx, probs = checkdisk._view_index_entries(
                 root, alloc, bmp, nm,
                 key_fn=lambda k, f=kfmt: struct.unpack_from(f, k))
             assert probs == [], (nm, probs)
@@ -996,7 +996,7 @@ class NtfsDirentFixTests(unittest.TestCase):
         value_ofs = struct.unpack_from('<H', rec, a + 20)[0]
         _patch(self.img.path, off + a + value_ofs + 52, struct.pack('<I', 0xBEEF))
 
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             chk = vol.secure_check()
         self.assertTrue(any('48879' in p for p in chk['ref_missing']), chk)
 
@@ -1005,7 +1005,7 @@ class NtfsDirentFixTests(unittest.TestCase):
     def test_surface_owner_attribution(self) -> None:
         self.img.populate({'repro/fat.bin': b'y' * 8192})
         lcn = first_data_lcn(self.img.path, 'fat.bin')
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             free_probe = vol.nr_clusters() - 2  # tail of a fresh volume: free
             owners = vol.surface_owners({lcn, free_probe})
         owned = [o for o in owners if o['record'] is not None]
@@ -1028,7 +1028,7 @@ class NtfsDirentFixTests(unittest.TestCase):
 
     def test_raw_backend_usn(self) -> None:
         self._make_usn_file(usn_stream('a.txt', 'b.txt'))
-        with ndf.RawVolume(self.img.path) as raw:
+        with checkdisk.RawVolume(self.img.path) as raw:
             info = raw.usn_check(path='/usnlab')
         self.assertEqual((info['records'], info['problems'], info['journal_id']),
                          (2, [], 0xABCDEF))
@@ -1058,7 +1058,7 @@ class NtfsDirentFixTests(unittest.TestCase):
         self.img.populate({'repro/keep.py': b'ok\n', 'repro/lostme.bin': content})
         # fabricate exactly the torn-rename shape: a live record whose index
         # entry vanished — our own rm removes the entry of a healthy file
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             vol.remove_dirent('/repro', 'lostme.bin', really=True)
         self.assertEqual(self.img.list_dir('repro'), ['keep.py'])
 
@@ -1074,9 +1074,9 @@ class NtfsDirentFixTests(unittest.TestCase):
         proc = self._cli('/f', self.img.path)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(self.img.list_dir('repro'), ['keep.py', 'lostme.bin'])
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             e = next(x for x in v.scan_dir('/repro') if x['name'] == 'lostme.bin')
-            self.assertEqual(v._attr_value(e['record'], ndf.AT_DATA, None),
+            self.assertEqual(v._attr_value(e['record'], checkdisk.AT_DATA, None),
                              content, 'content must survive intact')
 
     # -- survey extras: orphaned extensions, link counts, view indexes --
@@ -1085,7 +1085,7 @@ class NtfsDirentFixTests(unittest.TestCase):
         self.img.populate({'repro/keep.py': b'ok\n', 'repro/victim.bin': b'v\n'})
         _, off = _find_file_record(self.img.path, 'victim.bin')
         _patch(self.img.path, off + 32, struct.pack('<Q', 999 | (5 << 48)))
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             s = vol.mft_survey()
         self.assertTrue(any('orphaned extension' in p['problem']
                             for p in s['runlist_problems']), s['runlist_problems'])
@@ -1094,14 +1094,14 @@ class NtfsDirentFixTests(unittest.TestCase):
         self.img.populate({'repro/keep.py': b'ok\n', 'repro/victim.bin': b'v\n'})
         _, off = _find_file_record(self.img.path, 'victim.bin')
         _patch(self.img.path, off + 18, struct.pack('<H', 7))
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             s = vol.mft_survey()
         self.assertTrue(any('hard-link count 7' in p['problem']
                             for p in s['runlist_problems']), s['runlist_problems'])
 
     def test_view_index_clean_on_healthy(self) -> None:
         self.img.populate({'repro/keep.py': b'ok\n'})
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             vw = vol.view_index_check()
         self.assertEqual(vw['problems'], [], vw)
 
@@ -1113,17 +1113,17 @@ class NtfsDirentFixTests(unittest.TestCase):
         self.img.populate({'repro/keep.py': b'ok\n', 'repro/fat.bin': b'y' * 8192})
         corrupt_torn_truncate(self.img.path, 'fat.bin')
 
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             probs = [p for p in vol.mft_survey()['runlist_problems']
                      if p['fix_mp_off'] is not None]
             self.assertEqual(len(probs), 1)
             vol.terminate_mapping_pairs(probs[0]['record'], probs[0]['fix_mp_off'])
 
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             s = v.mft_survey(want_used=True)
             self.assertEqual(s['runlist_problems'], [])
             e = next(x for x in v.scan_dir('/repro') if x['name'] == 'fat.bin')
-            self.assertEqual(v._attr_value(e['record'], ndf.AT_DATA, None), b'')
+            self.assertEqual(v._attr_value(e['record'], checkdisk.AT_DATA, None), b'')
             flags = struct.unpack_from('<H', v._attr_value(3, 0x70, None), 10)[0]
         self.assertFalse(flags & 1, 'clean close must clear the dirty flag')
 
@@ -1131,11 +1131,11 @@ class NtfsDirentFixTests(unittest.TestCase):
         '''Rewriting record 0 (content unchanged, USN bumped) must keep
            $MFTMirr byte-in-sync — drivers refuse to mount when it diverges.'''
         self.img.populate({'repro/keep.py': b'ok\n'})
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             rec = bytearray(vol.read_record(0))
-            assert ndf._apply_fixups(rec)
+            assert checkdisk._apply_fixups(rec)
             vol.write_record(0, rec)
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             csz = v._cluster_size
             data = _read(self.img.path)
             boot = data[:512]
@@ -1151,7 +1151,7 @@ class NtfsDirentFixTests(unittest.TestCase):
 
     def test_native_cluster_allocator_audit_oracle(self) -> None:
         self.img.populate({'repro/keep.py': b'ok\n'})
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             base = vol.cluster_audit()
             self.assertEqual((base['extra'], base['missing']), (0, 0))
             runs = vol.alloc_clusters(10, near_lcn=100)
@@ -1159,7 +1159,7 @@ class NtfsDirentFixTests(unittest.TestCase):
             audit = vol.cluster_audit()
             self.assertEqual((audit['extra'], audit['missing']), (10, 0),
                              'allocated-unreferenced clusters must audit as leak')
-            with self.assertRaises(ndf.NtfsError):   # double-alloc protection
+            with self.assertRaises(checkdisk.NtfsError):   # double-alloc protection
                 vol.free_clusters(runs + runs)
             vol.free_clusters(runs)
             audit = vol.cluster_audit()
@@ -1168,16 +1168,16 @@ class NtfsDirentFixTests(unittest.TestCase):
 
     def test_native_mft_record_allocator(self) -> None:
         self.img.populate({'repro/keep.py': b'ok\n'})
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             a = vol.alloc_record()
             b = vol.alloc_record()
             self.assertGreaterEqual(a, 24)
             self.assertNotEqual(a, b, 'second alloc must pick a different slot')
         # free + realloc determinism, through a fresh volume handle
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             vol.free_record(a)
             vol.free_record(b)
-            with self.assertRaises(ndf.NtfsError):  # double free refused
+            with self.assertRaises(checkdisk.NtfsError):  # double free refused
                 vol.free_record(a)
             self.assertEqual(vol.alloc_record(), a, 'first-fit must reuse slot a')
         self.assertEqual(self.img.list_dir('repro'), ['keep.py'])
@@ -1188,7 +1188,7 @@ class NtfsDirentFixTests(unittest.TestCase):
     def _referenced(vol):
         '''The set of records reachable by walking every directory index —
            what find_lost_files diffs against.'''
-        refs, stack, seen = set(), [ndf.FILE_ROOT], {ndf.FILE_ROOT}
+        refs, stack, seen = set(), [checkdisk.FILE_ROOT], {checkdisk.FILE_ROOT}
         while stack:
             probe = vol.probe_dir_no(stack.pop())
             if not probe['readable']:
@@ -1206,10 +1206,10 @@ class NtfsDirentFixTests(unittest.TestCase):
            collation-ordered directory.'''
         self.img.populate({'repro/keep.py': b'ok\n', 'repro/gone.py': b'x\n',
                            'repro/third.py': b'3\n'})
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             vol.remove_dirent('/repro', 'gone.py', really=True)
         self.assertEqual(self.img.list_dir('repro'), ['keep.py', 'third.py'])
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             bad = [e for e in v.scan_dir('/repro')
                    if e['status'] not in ('ok', 'dir-self')]
         self.assertEqual(bad, [])
@@ -1224,7 +1224,7 @@ class NtfsDirentFixTests(unittest.TestCase):
         target = next(f'file_{i:04d}.dat' for i in range(400)
                       if f'file_{i:04d}.dat' not in seps)
 
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             vol.remove_dirent('/big', target, really=True)
 
         expect = sorted(f'file_{i:04d}.dat' for i in range(400)
@@ -1252,18 +1252,18 @@ class NtfsDirentFixTests(unittest.TestCase):
 
     def _separators(self, path):
         '''Every internal-node separator name across root + all INDX blocks.'''
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             dir_no = vol._resolve(path)
-            root = vol._attr_value(dir_no, ndf.AT_INDEX_ROOT, vol.I30)
+            root = vol._attr_value(dir_no, checkdisk.AT_INDEX_ROOT, vol.I30)
             names = list(self._node_names(root, 16))
             bs = struct.unpack_from("<I", root, 8)[0]
             try:
-                alloc = vol._attr_value(dir_no, ndf.AT_INDEX_ALLOCATION, vol.I30)
-            except ndf.NtfsError:
+                alloc = vol._attr_value(dir_no, checkdisk.AT_INDEX_ALLOCATION, vol.I30)
+            except checkdisk.NtfsError:
                 alloc = b''
             for i in range(len(alloc) // bs):
                 blk = bytearray(alloc[i * bs:(i + 1) * bs])
-                if blk[:4] == b'INDX' and ndf._apply_fixups(blk):
+                if blk[:4] == b'INDX' and checkdisk._apply_fixups(blk):
                     names += self._node_names(blk, 24)
         return dir_no, set(names)
 
@@ -1275,12 +1275,12 @@ class NtfsDirentFixTests(unittest.TestCase):
         self.assertTrue(seps, 'expected internal-node separators somewhere')
         target = sorted(seps)[0]
 
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             vol.remove_index_entry(dir_no, target)
 
         expect = sorted(f'file_{i:04d}.dat' for i in range(600)
                         if f'file_{i:04d}.dat' != target)
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             names = sorted(e['name'] for e in v.scan_dir('/big')
                            if e['status'] != 'dir-self')
             self.assertEqual(names, expect, 'native internal removal set mismatch')
@@ -1291,11 +1291,11 @@ class NtfsDirentFixTests(unittest.TestCase):
            the volume verifies clean and the driver lists correctly.'''
         self.img.populate({'repro/keep.py': b'ok\n', 'repro/gone.py': b'x\n'})
         corrupt_record_free(self.img.path, 'gone.py')
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             self.assertEqual(vol.classify_dirent('/repro', 'gone.py')['state'],
                              'record-free')
             vol.remove_dirent('/repro', 'gone.py', really=True)
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             self.assertEqual([e for e in vol.scan_dir('/repro')
                               if e['status'] not in ('ok', 'dir-self')], [])
         self.assertEqual(self.img.list_dir('repro'), ['keep.py'])
@@ -1309,33 +1309,33 @@ class NtfsDirentFixTests(unittest.TestCase):
         content = b'reconnect me\n' * 40
         self.img.populate({'repro/keep.py': b'ok\n', 'repro/lost.bin': content,
                            'repro/mid.py': b'm\n'})
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             vol.remove_dirent('/repro', 'lost.bin', really=True)
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             lost = [l for l in vol.find_lost_files(self._referenced(vol))
                     if l['name'] == 'lost.bin'][0]
             self.assertEqual(vol.reconnect_lost(lost), 1)
 
         self.assertEqual(self.img.list_dir('repro'),
                          ['keep.py', 'lost.bin', 'mid.py'])
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             e = next(x for x in v.scan_dir('/repro') if x['name'] == 'lost.bin')
-            self.assertEqual(v._attr_value(e['record'], ndf.AT_DATA, None), content)
+            self.assertEqual(v._attr_value(e['record'], checkdisk.AT_DATA, None), content)
 
     def test_native_reconnect_indx_leaf(self) -> None:
         '''Large directory: reconnect a lost file whose name lands in an
            INDX leaf that has room.'''
         self.img.populate({f'big/file_{i:04d}.dat': b'x' for i in range(500)})
         victim = 'file_0250.dat'
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             vol.remove_dirent('/big', victim, really=True)
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             lost = [l for l in vol.find_lost_files(self._referenced(vol))
                     if l['name'] == victim][0]
             vol.reconnect_lost(lost)
 
         expect = sorted(f'file_{i:04d}.dat' for i in range(500))
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             names = sorted(e['name'] for e in v.scan_dir('/big')
                            if e['status'] != 'dir-self')
             self.assertEqual(names, expect)
@@ -1344,17 +1344,17 @@ class NtfsDirentFixTests(unittest.TestCase):
     def test_native_insert_ordering_and_dup(self) -> None:
         '''Insertion must land in collation order and refuse a duplicate.'''
         self.img.populate({'d/bbb.txt': b'b', 'd/mmm.txt': b'm', 'd/yyy.txt': b'y'})
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             dno = v._resolve('/d')
             info = v.record_info  # noqa
         # forge a leaf entry for 'ggg.txt' pointing at an unused-but-plausible
         # ref is unnecessary: reuse mmm.txt's own record so the entry resolves
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             dno = v._resolve('/d')
             e = next(x for x in v.scan_dir('/d') if x['name'] == 'mmm.txt')
             fn = None
             for frozen, a, _l in v._record_attrs(e['record']):
-                if struct.unpack_from('<I', frozen, a)[0] == ndf.AT_FILE_NAME and frozen[a + 8] == 0:
+                if struct.unpack_from('<I', frozen, a)[0] == checkdisk.AT_FILE_NAME and frozen[a + 8] == 0:
                     vo = struct.unpack_from('<H', frozen, a + 20)[0]
                     vl = struct.unpack_from('<I', frozen, a + 16)[0]
                     fn = bytes(frozen[a + vo:a + vo + vl])
@@ -1363,11 +1363,11 @@ class NtfsDirentFixTests(unittest.TestCase):
         new_fn = bytearray(fn)
         nm = 'ggg.txt'.encode('utf-16-le')
         new_fn[66:66 + len(nm)] = nm
-        with ndf.RawVolumeRW(self.img.path) as v:
+        with checkdisk.RawVolumeRW(self.img.path) as v:
             v.insert_index_entry(dno, e['mref'], bytes(new_fn))
-            with self.assertRaises(ndf.NtfsError):     # duplicate refused
+            with self.assertRaises(checkdisk.NtfsError):     # duplicate refused
                 v.insert_index_entry(dno, e['mref'], bytes(new_fn))
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             names = [x['name'] for x in v.scan_dir('/d') if x['status'] != 'dir-self']
         self.assertEqual(names, sorted(names), 'entries must stay collation-ordered')
         self.assertIn('ggg.txt', names)
@@ -1381,14 +1381,14 @@ class NtfsDirentFixTests(unittest.TestCase):
                            'repro/orphan.py': b'y' * 8192})
         corrupt_orphan(self.img.path, 'orphan.py')
 
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             v = vol.classify_dirent('/repro', 'orphan.py')
             self.assertEqual(v['state'], 'orphan')
             rec_no = v['dirent_record']
             vol.purge_orphan('/repro', 'orphan.py', really=True)
 
         # native result: record freed, bitmap consistent, entry gone
-        with ndf.RawVolume(self.img.path) as vol:
+        with checkdisk.RawVolume(self.img.path) as vol:
             audit = vol.cluster_audit()
             self.assertEqual((audit['extra'], audit['missing']), (0, 0),
                              'purge must leave $Bitmap consistent')
@@ -1404,7 +1404,7 @@ class NtfsDirentFixTests(unittest.TestCase):
         self.img.populate({'repro/keep.py': b'ok\n', 'repro/reusedme.dat': b'z\n'})
         corrupt_record_reused(self.img.path, 'reusedme.dat', 'squatter.dat')
         record_no = _find_file_record(self.img.path, 'squatter.dat')[0]
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             self.assertEqual(vol.classify_dirent('/repro', 'reusedme.dat')['state'],
                              'record-reused')
             with self.assertRaises(SystemExit):
@@ -1419,14 +1419,14 @@ class NtfsDirentFixTests(unittest.TestCase):
 
     def test_native_logfile_reset(self) -> None:
         self.img.populate({'repro/keep.py': b'ok\n', 'repro/two.py': b'2\n'})
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             n = vol.reset_logfile()
             self.assertGreater(n, 0)
             vol.clear_dirty()
         # $LogFile is now wholly 0xff-filled (the "clean" shape) and the
         # volume still scans, with the dirty flag clear
-        with ndf.RawVolume(self.img.path) as v:
-            log = v._attr_value(2, ndf.AT_DATA, None)
+        with checkdisk.RawVolume(self.img.path) as v:
+            log = v._attr_value(2, checkdisk.AT_DATA, None)
             self.assertTrue(log and set(log) == {0xFF})
             self.assertEqual(self.img.list_dir('repro'), ['keep.py', 'two.py'])
             vi = v._attr_value(3, 0x70, None)
@@ -1446,7 +1446,7 @@ class NtfsDirentFixTests(unittest.TestCase):
             struct.pack_into('<Q', b, 16, mref)   # base record reference
             return bytes(b)
 
-        with ndf.RawVolumeRW(self.img.path) as v:
+        with checkdisk.RawVolumeRW(self.img.path) as v:
             scratch = v.alloc_record()
         listing = ale(0x10, scratch) + ale(0x80, 77) + ale(0x80, 88)  # self + ext
         rec = bytearray(rsize)
@@ -1467,7 +1467,7 @@ class NtfsDirentFixTests(unittest.TestCase):
         struct.pack_into('<I', rec, 24, off + len(attr) + 4)     # bytes_in_use
         struct.pack_into('<I', rec, 28, rsize)                    # bytes_allocated
 
-        with ndf.RawVolumeRW(self.img.path) as v:
+        with checkdisk.RawVolumeRW(self.img.path) as v:
             v.write_record(scratch, rec)
             exts = v._extension_records(scratch)
             v.free_record(scratch)
@@ -1482,12 +1482,12 @@ class NtfsDirentFixTests(unittest.TestCase):
         import random
         rng = random.Random(4)
         victims = [f'f{i:04d}.dat' for i in sorted(rng.sample(range(900), 200))]
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             for n in victims:
                 vol.remove_dirent('/big', n, really=True)
 
         def lost(vol):
-            refs, st, seen = set(), [ndf.FILE_ROOT], {ndf.FILE_ROOT}
+            refs, st, seen = set(), [checkdisk.FILE_ROOT], {checkdisk.FILE_ROOT}
             while st:
                 p = vol.probe_dir_no(st.pop())
                 if not p['readable']:
@@ -1500,14 +1500,14 @@ class NtfsDirentFixTests(unittest.TestCase):
                             st.append(e['record'])
             return refs
 
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             for lf in [l for l in vol.find_lost_files(lost(vol)) if l['parent_ok']]:
                 try:
                     vol.reconnect_lost(lf)
-                except ndf.NtfsError as exc:      # cascade -> library-only, atomic
+                except checkdisk.NtfsError as exc:      # cascade -> library-only, atomic
                     self.assertEqual(exc.errno, __import__('errno').ENOTSUP)
         expect = sorted(f'f{i:04d}.dat' for i in range(900))
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             names = sorted(e['name'] for e in v.scan_dir('/big')
                            if e['status'] != 'dir-self')
             bad = [e for e in v.scan_dir('/big') if e['status'] not in ('ok', 'dir-self')]
@@ -1520,18 +1520,18 @@ class NtfsDirentFixTests(unittest.TestCase):
            growth). Each insert is atomic — the tree stays exactly the applied
            set even where a later insert refuses (deep $ATTRIBUTE_LIST spill).'''
         self.img.populate({f'big/f{i:04d}.dat': b'x' for i in range(400)})
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             e = next(x for x in v.scan_dir('/big') if x['name'] == 'f0000.dat')
             mref = e['mref']
             fn = None
             for fr, a, _l in v._record_attrs(e['record']):
-                if struct.unpack_from('<I', fr, a)[0] == ndf.AT_FILE_NAME and fr[a + 8] == 0:
+                if struct.unpack_from('<I', fr, a)[0] == checkdisk.AT_FILE_NAME and fr[a + 8] == 0:
                     vo = struct.unpack_from('<H', fr, a + 20)[0]
                     vl = struct.unpack_from('<I', fr, a + 16)[0]
                     fn = bytes(fr[a + vo:a + vo + vl])
                     break
         done = 0
-        with ndf.RawVolumeRW(self.img.path) as v:
+        with checkdisk.RawVolumeRW(self.img.path) as v:
             dno = v._resolve('/big')
             for i in range(1500):
                 nm = f'z{i:04d}.new'.encode('utf-16-le')
@@ -1541,11 +1541,11 @@ class NtfsDirentFixTests(unittest.TestCase):
                 try:
                     v.insert_index_entry(dno, mref, bytes(nf))
                     done += 1
-                except ndf.NtfsError:
+                except checkdisk.NtfsError:
                     pass  # cascade / grow limit -> library-only, atomic
         expect = sorted([f'f{i:04d}.dat' for i in range(400)]
                         + [f'z{i:04d}.new' for i in range(done)])
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             names = sorted(e['name'] for e in v.scan_dir('/big')
                            if e['status'] != 'dir-self')
         self.assertEqual(names, expect, 'every insert was atomic (applied or not)')
@@ -1556,16 +1556,16 @@ class NtfsDirentFixTests(unittest.TestCase):
         files = {f'bigdir/file_{i:03d}.dat': f'c{i}\n'.encode() for i in range(60)}
         self.img.populate(files, dirs=('bigdir/subdir',))
         expect = sorted(self.img.list_dir('bigdir'))
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             dno = v._resolve('/bigdir')
         tear_index_block(self.img.path, 'file_')
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             self.assertFalse(v.probe_dir_no(dno)['readable'], 'index should be torn')
-        with ndf.RawVolumeRW(self.img.path) as v:
+        with checkdisk.RawVolumeRW(self.img.path) as v:
             res = v.rebuild_index(dno)
         self.assertEqual(res['entries'], 61)
         self.assertGreaterEqual(res['blocks'], 2)
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             names = sorted(e['name'] for e in v.scan_dir_no(dno)
                            if e['status'] != 'dir-self')
             bad = [e for e in v.scan_dir_no(dno) if e['status'] not in ('ok', 'dir-self')]
@@ -1580,13 +1580,13 @@ class NtfsDirentFixTests(unittest.TestCase):
         self.img = NtfsImage(size=192 * 1024 * 1024)
         self.img.populate(files, dirs=('bigdir/sub',))
         expect = sorted(self.img.list_dir('bigdir'))
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             dno = v._resolve('/bigdir')
         tear_index_block(self.img.path, 'file_')
-        with ndf.RawVolumeRW(self.img.path) as v:
+        with checkdisk.RawVolumeRW(self.img.path) as v:
             res = v.rebuild_index(dno)
         self.assertGreater(res['blocks'], 40, 'expected a multi-level tree')
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             names = sorted(e['name'] for e in v.scan_dir_no(dno)
                            if e['status'] != 'dir-self')
             bad = [e for e in v.scan_dir_no(dno) if e['status'] not in ('ok', 'dir-self')]
@@ -1596,9 +1596,9 @@ class NtfsDirentFixTests(unittest.TestCase):
 
     def test_native_rebuild_small_root(self) -> None:
         self.img.populate({'d/a.txt': b'a', 'd/b.txt': b'b', 'd/c.txt': b'c'})
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             dno = v._resolve('/d')
-        with ndf.RawVolumeRW(self.img.path) as v:
+        with checkdisk.RawVolumeRW(self.img.path) as v:
             res = v.rebuild_index(dno)   # small: packs the resident root
         self.assertEqual(res['blocks'], 0)
         self.assertEqual(self.img.list_dir('d'), ['a.txt', 'b.txt', 'c.txt'])
@@ -1624,12 +1624,12 @@ class NtfsDirentFixTests(unittest.TestCase):
         self.img.populate({'d/aaa00.txt': b'x', 'd/aaa01.txt': b'y',
                            'd/aaa02.txt': b'z',
                            **{f'pad/p{i:04d}.bin': b'.' for i in range(400)}})
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             dno = v._resolve('/d')
             e = next(x for x in v.scan_dir('/d') if x['name'] == 'aaa00.txt')
             template = name_abs = None
             for fr, a, _l in v._record_attrs(e['record']):   # a real /d child
-                if struct.unpack_from('<I', fr, a)[0] == ndf.AT_FILE_NAME and fr[a + 8] == 0:
+                if struct.unpack_from('<I', fr, a)[0] == checkdisk.AT_FILE_NAME and fr[a + 8] == 0:
                     vo = struct.unpack_from('<H', fr, a + 20)[0]
                     vl = struct.unpack_from('<I', fr, a + 16)[0]
                     fn = bytes(fr[a + vo:a + vo + vl])   # value: parent=/d + name
@@ -1640,19 +1640,19 @@ class NtfsDirentFixTests(unittest.TestCase):
             pad = [e['record'] for e in v.scan_dir('/pad')
                    if e['status'] == 'ok'][:300]         # real record slots
         self.assertEqual(len(pad), 300)
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             for i in range(400):                          # orphan the decoys
                 vol.remove_dirent('/pad', f'p{i:04d}.bin', really=True)
 
         def has_ia():
-            with ndf.RawVolumeRW(self.img.path) as v:
+            with checkdisk.RawVolumeRW(self.img.path) as v:
                 r = bytearray(v.read_record(dno))
-                ndf._apply_fixups(r)
-                return v._base_attr(r, ndf.AT_INDEX_ALLOCATION, v.I30) is not None
+                checkdisk._apply_fixups(r)
+                return v._base_attr(r, checkdisk.AT_INDEX_ALLOCATION, v.I30) is not None
 
         self.assertFalse(has_ia(), 'dir should start small (no $INDEX_ALLOCATION)')
         done = 0
-        with ndf.RawVolumeRW(self.img.path) as v:
+        with checkdisk.RawVolumeRW(self.img.path) as v:
             for i, rno in enumerate(pad):
                 nm = f'n{i:04d}.txt'.encode('utf-16-le')     # 9 chars, 18 bytes
                 # repurpose a real orphaned slot into a /d child carrying nm
@@ -1669,7 +1669,7 @@ class NtfsDirentFixTests(unittest.TestCase):
         self.assertTrue(has_ia(), 'small→large conversion should have fired')
         expect = sorted(['aaa00.txt', 'aaa01.txt', 'aaa02.txt']
                         + [f'n{i:04d}.txt' for i in range(done)])
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             names = sorted(e['name'] for e in v.scan_dir('/d')
                            if e['status'] != 'dir-self')
             bad = [e for e in v.scan_dir('/d') if e['status'] not in ('ok', 'dir-self')]
@@ -1683,11 +1683,11 @@ class NtfsDirentFixTests(unittest.TestCase):
            (so the directory path stays byte-identical), and self._ix must honour
            an override and fall back to $I30 when it is cleared.'''
         self.img.populate({'d/alpha.txt': b'x', 'd/Beta.TXT': b'y'})
-        with ndf.RawVolumeRW(self.img.path) as v:
+        with checkdisk.RawVolumeRW(self.img.path) as v:
             e = next(x for x in v.scan_dir('/d') if x['name'] == 'alpha.txt')
             fn = None
             for fr, a, _l in v._record_attrs(e['record']):
-                if struct.unpack_from('<I', fr, a)[0] == ndf.AT_FILE_NAME and fr[a + 8] == 0:
+                if struct.unpack_from('<I', fr, a)[0] == checkdisk.AT_FILE_NAME and fr[a + 8] == 0:
                     vo = struct.unpack_from('<H', fr, a + 20)[0]
                     vl = struct.unpack_from('<I', fr, a + 16)[0]
                     fn = bytes(fr[a + vo:a + vo + vl])
@@ -1698,10 +1698,10 @@ class NtfsDirentFixTests(unittest.TestCase):
             assert s.sort_key(fn) == v._upcase_seq(v._fn_key_name(fn))
             leaf = s.build_leaf(0x1234, fn)
             assert leaf == v._build_leaf_entry(0x1234, fn)
-            assert ndf._IndexSchema.stored_key(leaf) == fn
+            assert checkdisk._IndexSchema.stored_key(leaf) == fn
             assert s.entry_sort_key(leaf) == s.sort_key(fn)
             # the active schema follows an override and reverts to $I30
-            sentinel = ndf._IndexSchema(b'X\x00', 0x10, lambda k: k,
+            sentinel = checkdisk._IndexSchema(b'X\x00', 0x10, lambda k: k,
                                         lambda val, key: key)
             v._ix_override = sentinel
             assert v._ix is sentinel
@@ -1711,7 +1711,7 @@ class NtfsDirentFixTests(unittest.TestCase):
     def test_add_attr_roundtrip(self) -> None:
         '''_add_attr must produce an attribute the reader parses back.'''
         self.img.populate({'x/f.txt': b'ok\n'})
-        with ndf.RawVolumeRW(self.img.path) as v:
+        with checkdisk.RawVolumeRW(self.img.path) as v:
             scratch = v.alloc_record()
             rec = bytearray(v._rec_size)
             rec[:4] = b'FILE'
@@ -1723,8 +1723,8 @@ class NtfsDirentFixTests(unittest.TestCase):
             struct.pack_into('<I', rec, 0x18, 60)       # bytes_in_use
             struct.pack_into('<I', rec, 0x1C, v._rec_size)
             struct.pack_into('<H', rec, 0x28, 0)        # next_attr_id
-            off = v._add_attr(rec, ndf.AT_DATA, b'', resident=True, value=b'hello')
-            self.assertEqual(struct.unpack_from('<I', rec, off)[0], ndf.AT_DATA)
+            off = v._add_attr(rec, checkdisk.AT_DATA, b'', resident=True, value=b'hello')
+            self.assertEqual(struct.unpack_from('<I', rec, off)[0], checkdisk.AT_DATA)
             vo = struct.unpack_from('<H', rec, off + 0x14)[0]
             vl = struct.unpack_from('<I', rec, off + 0x10)[0]
             self.assertEqual(bytes(rec[off + vo:off + vo + vl]), b'hello')
@@ -1739,12 +1739,12 @@ class NtfsDirentFixTests(unittest.TestCase):
         import random
         rng = random.Random(3)
         victims = [f'f{i:05d}.dat' for i in sorted(rng.sample(range(2500), 900))]
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             for n in victims:
                 vol.remove_dirent('/big', n, really=True)
 
         def lost(vol):
-            refs, st, seen = set(), [ndf.FILE_ROOT], {ndf.FILE_ROOT}
+            refs, st, seen = set(), [checkdisk.FILE_ROOT], {checkdisk.FILE_ROOT}
             while st:
                 p = vol.probe_dir_no(st.pop())
                 if not p['readable']:
@@ -1757,11 +1757,11 @@ class NtfsDirentFixTests(unittest.TestCase):
                             st.append(e['record'])
             return refs
 
-        with ndf.RawVolumeRW(self.img.path) as vol:
+        with checkdisk.RawVolumeRW(self.img.path) as vol:
             for lf in [l for l in vol.find_lost_files(lost(vol)) if l['parent_ok']]:
                 vol.reconnect_lost(lf)          # cascade splits; must not refuse
         expect = sorted(f'f{i:05d}.dat' for i in range(2500))
-        with ndf.RawVolume(self.img.path) as v:
+        with checkdisk.RawVolume(self.img.path) as v:
             names = sorted(e['name'] for e in v.scan_dir('/big')
                            if e['status'] != 'dir-self')
             bad = [e for e in v.scan_dir('/big') if e['status'] not in ('ok', 'dir-self')]

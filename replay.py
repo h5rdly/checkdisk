@@ -346,10 +346,10 @@ class _Tbl:
 
 
 class LogReplay:
-    def __init__(self, vol: ndf.RawVolumeRW):
+    def __init__(self, vol: checkdisk.RawVolumeRW):
         self.v = vol
         self.csz = vol._cluster_size
-        size, self.log_runs = vol._stream_runs(2, ndf.AT_DATA, None)
+        size, self.log_runs = vol._stream_runs(2, checkdisk.AT_DATA, None)
         self.raw = bytearray(vol._runs_read(self.log_runs, 0, size))
         self.report = {'records': 0, 'redo_applied': 0, 'redo_skipped': 0,
                        'undo_applied': 0, 'txn_committed': 0, 'txn_undone': 0,
@@ -365,7 +365,7 @@ class LogReplay:
             page = bytearray(self.raw[pg * 4096:(pg + 1) * 4096])
             if page[:4] not in (RSTR_MAGIC, CHKD_MAGIC):
                 continue
-            if not ndf._apply_fixups(page):
+            if not checkdisk._apply_fixups(page):
                 continue
             rh = RestartHdr.parse(page)
             ra = RestartArea.parse(page, rh.ra_off)
@@ -418,7 +418,7 @@ class LogReplay:
             if page[:4] != RCRD_MAGIC:
                 continue
             page = bytearray(page)
-            if not ndf._apply_fixups(page):
+            if not checkdisk._apply_fixups(page):
                 continue
             self.raw[off:off + self.page_size] = page
             if self.rh.major_ver >= 2:
@@ -688,13 +688,13 @@ class LogReplay:
     def _clusters_read(self, lcns: list[int]) -> bytearray:
         out = bytearray()
         for lcn in lcns:
-            out += ndf._pread(self.v._fd, self.csz, self.v._base + lcn * self.csz)
+            out += checkdisk._pread(self.v._fd, self.csz, self.v._base + lcn * self.csz)
         return out
 
     def _clusters_write(self, lcns: list[int], buf: bytes) -> None:
         for i, lcn in enumerate(lcns):
             chunk = bytes(buf[i * self.csz:(i + 1) * self.csz])
-            ndf._pwrite(self.v._fd, chunk, self.v._base + lcn * self.csz)
+            checkdisk._pwrite(self.v._fd, chunk, self.v._base + lcn * self.csz)
 
     # ── op application (shared by redo and undo) ─────────────────────────────
 
@@ -762,13 +762,13 @@ class LogReplay:
             aid = struct.unpack_from('<H', data, 0x0E)[0]
             if nid <= aid:
                 struct.pack_into('<H', rec, 0x28, aid + 1)
-            if struct.unpack_from('<I', data, 0)[0] == ndf.AT_FILE_NAME:
+            if struct.unpack_from('<I', data, 0)[0] == checkdisk.AT_FILE_NAME:
                 links = struct.unpack_from('<H', rec, 18)[0]
                 struct.pack_into('<H', rec, 18, links + 1)
         elif op == Op.DeleteAttribute:
             asize = struct.unpack_from('<I', rec, a + 4)[0]
             u = used()
-            if struct.unpack_from('<I', rec, a)[0] == ndf.AT_FILE_NAME:
+            if struct.unpack_from('<I', rec, a)[0] == checkdisk.AT_FILE_NAME:
                 links = struct.unpack_from('<H', rec, 18)[0]
                 struct.pack_into('<H', rec, 18, max(0, links - 1))
             rec[a:u - asize] = rec[a + asize:u]
@@ -929,7 +929,7 @@ class LogReplay:
             # on-disk (sealed) block; accept an already-logical one as-is. Either
             # way we _seal_fixups on write below, so the final block is valid.
             probe = bytearray(blk)
-            if ndf._apply_fixups(probe):
+            if checkdisk._apply_fixups(probe):
                 blk = probe                       # was sealed on disk → now logical
             page_lsn = struct.unpack_from('<Q', blk, 8)[0]
             if gate and page_lsn >= lsn:
@@ -965,7 +965,7 @@ class LogReplay:
                 doff = struct.unpack_from('<H', blk, e1)[0]
                 blk[e1 + doff:e1 + doff + dlen] = data
             struct.pack_into('<Q', blk, 8, lsn)
-            ndf._seal_fixups(blk)
+            checkdisk._seal_fixups(blk)
             buf[ib:ib + len(blk)] = blk
         elif op in (Op.SetBitsInNonresidentBitMap, Op.ClearBitsInNonresidentBitMap):
             bit_off, bits = struct.unpack_from('<II', data, 0)
@@ -1049,7 +1049,7 @@ def replay(path: str, really: bool) -> dict:
     # open read-only — otherwise RawVolumeRW's open/close $MFTMirr sync would
     # write a handful of bytes and a "dry run" would not be one. The write
     # passes (redo/undo/finalize) need the RW volume.
-    vol_cls = ndf.RawVolumeRW if really else ndf.RawVolume
+    vol_cls = checkdisk.RawVolumeRW if really else checkdisk.RawVolume
     with vol_cls(path) as v:
         lr = LogReplay(v)
         lr.analyze()
