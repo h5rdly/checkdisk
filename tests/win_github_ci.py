@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 '''Native Windows chkdsk oracle — the QEMU cross-check without the VM.
 
 The portable suite (tests.py, ci_tests.py) verifies checkdisk.py with its own
@@ -5,8 +6,9 @@ readers. This module adds the one external authority that matters — Microsoft'
 own chkdsk — but runs it *natively* on a real Windows CI runner instead of a
 QEMU guest, so it needs no 40 GB installed image and no /dev/kvm. Each test
 fabricates a bare NTFS volume with format.py, wraps it in a fixed VHD (an MBR
-disk with one partition, plus the 512-byte VHD footer), asks Windows to
-`Mount-DiskImage` it read-only, and runs chkdsk against the drive letter.
+disk with one partition, plus the 512-byte VHD footer), attaches it read-only
+through virtdisk.dll (see win_vhd — ctypes, no PowerShell), and runs chkdsk
+against the resulting drive letter.
 
 The claim tested is the same triad the QEMU oracle checks: a clean volume and a
 checkdisk-repaired volume both come back clean (exit 0), while an unrepaired
@@ -21,17 +23,20 @@ is the only place a genuine chkdsk verdict enters the suite.
 
 from __future__ import annotations
 
-import os, struct, subprocess, sys, tempfile 
+import os
+import struct
+import subprocess
+import sys
+import tempfile
 import unittest
 
-_here = __file__.replace('\\', '/').rsplit('/', 1)[0]
+_here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)                    # tests/ (sibling fabricators)
 sys.path.insert(0, os.path.dirname(_here))   # repo root (checkdisk / format)
 
 if sys.platform == 'win32':                  # importing the fixtures pulls in
     import tests as T                        # format.py; only needed on Windows
     CHECKDISK = os.path.join(os.path.dirname(_here), 'checkdisk.py')
-
 
 SECTOR = 512
 PART_LBA = 2048                              # 1 MiB-aligned partition start
@@ -103,39 +108,12 @@ def _vhd_footer(size: int) -> bytes:
     return bytes(f)
 
 
-# PowerShell: mount the VHD read-only, letter the partition if needed, run
-# read-only chkdsk, print machine-parseable markers, always dismount.
-_PS = r'''
-$ErrorActionPreference = 'Stop'
-$vhd = {vhd!r}
-try {{
-    $img  = Mount-DiskImage -ImagePath $vhd -StorageType VHD -Access ReadOnly -PassThru
-    Start-Sleep -Milliseconds 750
-    $disk = $img | Get-DiskImage | Get-Disk
-    $part = Get-Partition -DiskNumber $disk.Number |
-            Where-Object {{ $_.Size -gt 1MB }} | Select-Object -First 1
-    $letter = $part.DriveLetter
-    if (-not $letter -or $letter -eq [char]0) {{
-        $used = (Get-Volume | Where-Object DriveLetter).DriveLetter
-        $letter = (67..90 | ForEach-Object {{ [char]$_ }} |
-                   Where-Object {{ $used -notcontains $_ }})[0]
-        Set-Partition -DiskNumber $disk.Number -PartitionNumber $part.PartitionNumber `
-                      -NewDriveLetter $letter
-    }}
-    $out  = (& chkdsk ($letter + ':') 2>&1 | Out-String)
-    $code = $LASTEXITCODE
-    Write-Output ('CHKDSK_EXIT=' + $code)
-    Write-Output '----OUTPUT----'
-    Write-Output $out
-}} finally {{
-    Dismount-DiskImage -ImagePath $vhd -ErrorAction SilentlyContinue | Out-Null
-}}
-'''
-
-
 def _chkdsk(volume_path: str) -> tuple[int, str]:
-    '''Frame VOLUME_PATH as a VHD, mount it read-only on the host, and return
-       (chkdsk_exit_code, chkdsk_output).'''
+    '''Frame VOLUME_PATH as a VHD, attach it read-only via virtdisk.dll (see
+       win_vhd), and return (chkdsk_exit_code, chkdsk_output). Read-only mount +
+       read-only chkdsk means Windows' online self-healing never touches the
+       bytes, so chkdsk sees exactly what checkdisk left.'''
+    import win_vhd                                     # ctypes; Windows-only
     with open(volume_path, 'rb') as fh:
         data = _frame_bytes(fh.read())
     fd, vhd = tempfile.mkstemp(suffix='.vhd', prefix='ckdk-')
@@ -143,18 +121,10 @@ def _chkdsk(volume_path: str) -> tuple[int, str]:
         with os.fdopen(fd, 'wb') as fh:
             fh.write(data)
             fh.write(_vhd_footer(len(data)))
-        proc = subprocess.run(
-            ['powershell', '-NoProfile', '-NonInteractive', '-Command',
-             _PS.format(vhd=vhd)],
-            capture_output=True, text=True, encoding='utf-8', errors='replace')
-        blob = (proc.stdout or '') + (proc.stderr or '')
-        marker = next((ln for ln in blob.splitlines()
-                       if ln.startswith('CHKDSK_EXIT=')), None)
-        if marker is None:
-            raise RuntimeError(
-                'chkdsk verdict never produced (Mount-DiskImage failed?):\n' + blob)
-        _, _, tail = blob.partition('----OUTPUT----')
-        return int(marker.split('=', 1)[1]), tail.strip()
+        with win_vhd.mounted_readonly(vhd) as letter:
+            proc = subprocess.run(['chkdsk', letter + ':'], capture_output=True,
+                                  text=True, encoding='utf-8', errors='replace')
+        return proc.returncode, (proc.stdout or '') + (proc.stderr or '')
     finally:
         if os.path.exists(vhd):
             os.unlink(vhd)
