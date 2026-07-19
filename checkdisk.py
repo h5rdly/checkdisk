@@ -1,5 +1,5 @@
 '''A self-contained, pure-Python NTFS repair tool — the parts of chkdsk /f that
-matter for a crashed volume, with no libntfs dependency.
+matter for a crashed volume, with no dependency beyond the standard library.
 
 A crash can leave a directory's B+ tree ($I30 index) holding entries whose MFT
 record is dead or reused (sequence-number mismatch). The ntfs3 kernel driver then
@@ -53,8 +53,8 @@ import argparse, array, bisect, errno, hashlib, os, struct, subprocess, sys, tim
 MREF_MASK = (1 << 48) - 1  # low 48 bits = record number, high 16 = sequence
 
 
-# UTF-16LE attribute/stream names (plain bytes; the native reader matches
-# names as bytes — no libntfs handles involved).
+# UTF-16LE attribute/stream names (plain bytes; the reader matches names
+# as bytes).
 INDEX_I30 = '$I30'.encode('utf-16-le')
 USN_MAX_NAME = '$Max'.encode('utf-16-le')
 USN_J_NAME = '$J'.encode('utf-16-le')
@@ -180,7 +180,8 @@ def _check_mapping_pairs(rec: bytes, attr_off: int, length: int,
             return f'bad pair header {header:#x} at +{pos - attr_off}', False, out
         if pos + 1 + len_sz + ofs_sz > end:
             return f'pair overruns attribute at +{pos - attr_off}', False, out
-        run_len = int.from_bytes(rec[pos + 1:pos + 1 + len_sz], 'little')
+        run_len = int.from_bytes(rec[pos + 1:pos + 1 + len_sz], 'little',
+                                 signed=True)
         if run_len <= 0:
             return f'non-positive run length {run_len} at +{pos - attr_off}', False, out
         if ofs_sz:  # 0 = sparse run, lcn unchanged
@@ -207,13 +208,6 @@ def _check_mapping_pairs(rec: bytes, attr_off: int, length: int,
     return None, False, out
 
 
-def _min_bytes_unsigned(v: int) -> bytes:
-    n = 1
-    while v >> (8 * n):
-        n += 1
-    return v.to_bytes(n, 'little')
-
-
 def _min_bytes_signed(v: int) -> bytes:
     n = 1
     while not -(1 << (8 * n - 1)) <= v < (1 << (8 * n - 1)):
@@ -230,7 +224,10 @@ def _encode_mapping_pairs(runs) -> bytes:
     for lcn, length in runs:
         if length <= 0:
             raise NtfsError(0, f'non-positive run length {length}')
-        len_bytes = _min_bytes_unsigned(length)
+        # both fields are signed varints: a length of 128 must be encoded as
+        # 80 00 (two bytes) — the driver sign-extends the top byte and treats
+        # a lone 80 as -128, refusing the whole runlist
+        len_bytes = _min_bytes_signed(length)
         if lcn < 0:  # sparse
             out.append(len(len_bytes))
             out += len_bytes
@@ -1210,13 +1207,14 @@ class RawVolume:
                 'unreadable_records': unreadable}
 
 
-    def __init__(self, device: str, readonly: bool = True):
+    def __init__(self, device: str, readonly: bool = True, base: int = 0):
         if not readonly:
             raise SystemExit('RawVolume is read-only — use RawVolumeRW for repairs')
         self.device = device
         self._upcase = None
+        self._base = base       # byte offset of the volume within the device
         self._fd = os.open(device, os.O_RDONLY)
-        boot = os.pread(self._fd, 512, 0)
+        boot = os.pread(self._fd, 512, self._base)
         if boot[3:7] != b'NTFS':
             raise NtfsError(0, f'{device}: no NTFS boot sector')
         bps = struct.unpack_from('<H', boot, 11)[0]
@@ -1261,7 +1259,7 @@ class RawVolume:
     # -- primitives --
 
     def _dev_read(self, offset: int, size: int) -> bytes:
-        return os.pread(self._fd, size, offset)
+        return os.pread(self._fd, size, self._base + offset)
 
     def _runs_read(self, runs, offset: int, size: int) -> bytes:
         '''Read [offset, offset+size) of a stream laid out by vcn-ordered runs;
@@ -1283,7 +1281,7 @@ class RawVolume:
             lo, hi = max(offset, r_start), min(end, r_end)
             if lo >= hi:
                 continue
-            data = os.pread(self._fd, hi - lo, lcn * csz + (lo - r_start))
+            data = os.pread(self._fd, hi - lo, self._base + lcn * csz + (lo - r_start))
             if lo == offset and hi == end:
                 return data  # common case: whole range inside one run
             if out is None:
@@ -1611,8 +1609,8 @@ class RawVolumeRW(RawVolume):
        lifecycle, allocators, B+ tree index edits (remove / insert with splits /
        bulk-load rebuild), $Secure and USN repairs '''
 
-    def __init__(self, device: str):
-        super().__init__(device, readonly=True)
+    def __init__(self, device: str, base: int = 0):
+        super().__init__(device, readonly=True, base=base)
         os.close(self._fd)
         self._fd = os.open(device, os.O_RDWR)
         self._mirror = None
@@ -1661,7 +1659,7 @@ class RawVolumeRW(RawVolume):
             if lo >= hi:
                 continue
             chunk = data[lo - offset:hi - offset]
-            if os.pwrite(self._fd, chunk, lcn * csz + (lo - r_start)) != len(chunk):
+            if os.pwrite(self._fd, chunk, self._base + lcn * csz + (lo - r_start)) != len(chunk):
                 raise NtfsError(errno.EIO, f'short write at stream offset {lo}')
             written += len(chunk)
         if written != len(data):
@@ -2037,12 +2035,14 @@ class RawVolumeRW(RawVolume):
         leaf_i, leaf = self._rightmost_leaf(alloc, block_size, ie_vcn)
         pred = self._last_real_entry(leaf, 24)
         if pred is None:
-            raise NtfsError(errno.EIO, 'empty subtree under an internal entry')
+            # legal shape (removals emptied the subtree) that predecessor
+            # promotion cannot cross — the caller rebuilds instead
+            raise NtfsError(errno.ENOTSUP, 'empty subtree under an internal entry')
         p_pos, p_len = pred
         p_bytes = bytes(leaf[p_pos:p_pos + p_len])
         p_flags = struct.unpack_from('<H', p_bytes, 12)[0]
         if p_flags & 1:
-            raise NtfsError(errno.EIO, 'predecessor unexpectedly has a subnode')
+            raise NtfsError(errno.ENOTSUP, 'predecessor unexpectedly has a subnode')
 
         # build the promoted separator: predecessor key/data + the deleted
         # entry's own subnode VCN, marked as a NODE entry
@@ -2074,9 +2074,47 @@ class RawVolumeRW(RawVolume):
 
     def remove_index_entry(self, dir_no: int, name: str) -> bool:
         '''Remove one $I30 entry by name — leaf via splice, internal via
-           predecessor promotion. Raises ENOTSUP only when a promotion would
-           overflow the node (that split is not implemented) or ENOENT when the
-           name is absent.'''
+           predecessor promotion; shapes the promotion cannot cross (emptied
+           subtree, overfull node) fall back to a bulk rebuild of the index
+           from its own surviving entries. Raises ENOENT when absent.'''
+        try:
+            return self._remove_index_entry_structural(dir_no, name)
+        except NtfsError as exc:
+            if exc.errno != errno.ENOTSUP:
+                raise
+            self._rebuild_without(dir_no, name)
+            return True
+
+    def _rebuild_without(self, dir_no: int, name: str) -> None:
+        '''Bulk-rebuild the index from its own current entries minus `name` —
+           always yields a canonical tree, reclaiming emptied blocks.'''
+        root = self._attr_value(dir_no, AT_INDEX_ROOT, self._ix.name)
+        try:
+            alloc = self._attr_value(dir_no, AT_INDEX_ALLOCATION, self._ix.name)
+        except NtfsError:
+            alloc = b''
+        block_size = struct.unpack_from('<I', root, 8)[0]
+        nodes = [(bytes(root), 16)]
+        for i in range(len(alloc) // block_size):
+            blk = bytearray(alloc[i * block_size:(i + 1) * block_size])
+            if blk[:4] == b'INDX' and _apply_fixups(blk):
+                nodes.append((bytes(blk), 24))
+        items = []
+        for buf, hdr in nodes:
+            reals, _end = self._decode_node(buf, hdr)
+            for e in reals:
+                klen = struct.unpack_from('<H', e, 10)[0]
+                fn = e[16:16 + klen]
+                nm = self._fn_key_name(fn).decode('utf-16-le', 'replace')
+                if self.names_equal(nm, name):
+                    continue
+                mref = struct.unpack_from('<Q', e, 0)[0]
+                leaf = self._ix.build_leaf(mref, fn)
+                items.append((self._ix.entry_sort_key(leaf), leaf))
+        items.sort(key=lambda t: t[0])
+        self._bulk_write_index(dir_no, [e for _, e in items])
+
+    def _remove_index_entry_structural(self, dir_no: int, name: str) -> bool:
         rec = self._load_record(dir_no)
         if rec is None:
             raise NtfsError(errno.EIO, f'directory record {dir_no} unreadable')
@@ -2231,9 +2269,10 @@ class RawVolumeRW(RawVolume):
 
     def _resident_grow_root(self, rec: bytearray, root_attr_off: int,
                             delta: int) -> None:
-        '''Grow the resident $INDEX_ROOT attribute by delta bytes in place,
-           shifting the attributes after it and the record's used size. Refuses
-           if the record has no room (that needs small→large conversion).'''
+        '''Resize the resident $INDEX_ROOT attribute by delta bytes in place
+           (negative shrinks), shifting the attributes after it and the
+           record's used size. Refuses if the record has no room for a grow
+           (that needs small→large conversion).'''
         in_use = struct.unpack_from('<I', rec, 0x18)[0]
         if in_use + delta > len(rec):
             raise NtfsError(errno.ENOTSUP,
@@ -2243,7 +2282,9 @@ class RawVolumeRW(RawVolume):
         rec[root_attr_off + attr_len + delta:
             root_attr_off + attr_len + delta + len(tail)] = tail
         for i in range(root_attr_off + attr_len, root_attr_off + attr_len + delta):
-            rec[i] = 0
+            rec[i] = 0                             # grow: zero the inserted gap
+        for i in range(in_use + delta, in_use):
+            rec[i] = 0                             # shrink: zero the freed tail
         vlen = struct.unpack_from('<I', rec, root_attr_off + 0x10)[0]
         vofs = struct.unpack_from('<H', rec, root_attr_off + 0x14)[0]
         struct.pack_into('<I', rec, root_attr_off + 4, attr_len + delta)
@@ -2388,13 +2429,18 @@ class RawVolumeRW(RawVolume):
 
     @staticmethod
     def _make_node_entry(e: bytes, vcn: int) -> bytes:
-        '''Promote leaf entry e to a NODE separator: the whole entry followed by
-           the 8-byte subnode VCN. A $Secure view-index entry carries its 20-byte
+        '''Promote entry e to a NODE separator: the entry followed by the
+           8-byte subnode VCN. A $Secure view-index entry carries its 20-byte
            data (+ $SDH magic) into the separator — NTFS keeps the median's data
            in the internal node — while a directory ($I30) entry is just
            header+key+pad, so this is byte-identical to the old header+key form
-           there.'''
+           there. An entry that is already a separator (multi-level split)
+           must first shed its own subnode VCN, or the ghost 8 bytes make
+           entry_length non-canonical — chkdsk flags that as an index error.'''
         elen = struct.unpack_from('<H', e, 8)[0]
+        flags = struct.unpack_from('<H', e, 12)[0]
+        if flags & 1:
+            elen -= 8
         base = bytes(e[:elen])
         base += b'\x00' * (-len(base) % 8)
         b = bytearray(base + struct.pack('<q', vcn))
@@ -2703,13 +2749,28 @@ class RawVolumeRW(RawVolume):
         mp = _encode_mapping_pairs(merged)
         mp_off = struct.unpack_from('<H', rec, a + 32)[0]
         if mp_off + len(mp) > ln:
-            self.free_clusters(new_runs)
-            if ia_no == dir_no:                 # still in the base — spill and retry
+            # the attribute is sized tightly, so a runlist that fragments
+            # routinely needs a few more bytes: grow it in place while its
+            # record has room, spilling only when the record is truly full
+            delta = (mp_off + len(mp) - ln + 7) & ~7
+            in_use = struct.unpack_from('<I', rec, 0x18)[0]
+            if in_use + delta <= len(rec):
+                tail = bytes(rec[a + ln:in_use])
+                rec[a + ln + delta:a + ln + delta + len(tail)] = tail
+                for i in range(a + ln, a + ln + delta):
+                    rec[i] = 0
+                struct.pack_into('<I', rec, a + 4, ln + delta)
+                struct.pack_into('<I', rec, 0x18, in_use + delta)
+                ln += delta
+            elif ia_no == dir_no:               # still in the base — spill and retry
+                self.free_clusters(new_runs)
                 self._spill_index_alloc(dir_no)
                 return self._grow_index_alloc(dir_no, block_size, vpb,
                                               self._read_i30_bitmap(dir_no), n_blocks)
-            raise NtfsError(errno.ENOTSUP, 'extension $INDEX_ALLOCATION record '
-                            'full — further spill not implemented')
+            else:
+                self.free_clusters(new_runs)
+                raise NtfsError(errno.ENOTSUP, 'extension $INDEX_ALLOCATION record '
+                                'full — further spill not implemented')
         for i in range(a + mp_off, a + ln):
             rec[i] = 0
         rec[a + mp_off:a + mp_off + len(mp)] = mp
@@ -2967,8 +3028,10 @@ class RawVolumeRW(RawVolume):
         cur_vlen = struct.unpack_from('<I', rec, ra + 0x10)[0]
         body_bytes = b''.join(body) + end
         need_vlen = 16 + 16 + len(body_bytes)
-        if need_vlen > cur_vlen:
-            self._resident_grow_root(rec, ra, (need_vlen - cur_vlen + 7) & ~7)
+        if need_vlen != cur_vlen:
+            # keep the attribute exactly-sized either way: Windows writes
+            # tight roots, and chkdsk flags slack as an index error
+            self._resident_grow_root(rec, ra, ((need_vlen + 7) & ~7) - cur_vlen)
             vofs = struct.unpack_from('<H', rec, ra + 0x14)[0]
             cur_vlen = struct.unpack_from('<I', rec, ra + 0x10)[0]
         val = ra + vofs                              # INDEX_ROOT prefix (16) kept

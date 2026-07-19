@@ -1,0 +1,127 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# The suite is pure Python and self-contained: images are fabricated by
+# format.py, corruption by raw byte surgery, and results verified with the
+# tool's own readers — no filesystem driver, no root, no external tooling. So
+# every OS leg needs nothing but a Python interpreter. The one external
+# authority, Microsoft's chkdsk, runs natively on the Windows leg.
+
+jobs:
+  # Linux: the reference leg — full portable suite plus the heavy
+  # multi-corruption pipeline, on two Python versions.
+  test-linux:
+    name: Test (Ubuntu, portable suite + heavy pipeline)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Portable suite
+        timeout-minutes: 10
+        run: python -X faulthandler tests/tests.py -v
+
+      # Native $LogFile replay against a real Windows crash fixture (research
+      # engine; the shipped tool resets the log instead). Deterministic report.
+      - name: Replay engine
+        timeout-minutes: 5
+        run: python -X faulthandler tests/replay_tests.py -v
+
+      # The "crashed-volume rehearsal": one image, thousands of files, every
+      # corruption class at once, full /f --really, canary checksums back
+      # through the tool's own readers. Catches walk-order / cache-interaction
+      # bugs that single-corruption unit tests structurally cannot.
+      - name: Heavy pipeline
+        timeout-minutes: 15
+        run: python -X faulthandler tests/ci_tests.py
+
+  # Alpine (musl): same suite against a musl libc build — a plain interpreter
+  # container, no privileged device or capability needed now that nothing mounts.
+  test-alpine:
+    name: Test (Alpine/musl, portable suite + heavy pipeline)
+    runs-on: ubuntu-latest
+    container:
+      image: python:3.14-alpine
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Portable suite
+        timeout-minutes: 10
+        run: python -X faulthandler tests/tests.py -v
+
+      - name: Replay engine
+        timeout-minutes: 5
+        run: python -X faulthandler tests/replay_tests.py -v
+
+      - name: Heavy pipeline
+        timeout-minutes: 15
+        run: python -X faulthandler tests/ci_tests.py
+
+  # macOS: proves the pure-Python logic runs unchanged on a BSD-derived host.
+  test-macos:
+    name: Test (macOS, portable suite)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Portable suite
+        run: python3 -X faulthandler tests/tests.py -v
+
+      - name: Replay engine
+        run: python3 -X faulthandler tests/replay_tests.py -v
+
+  # FreeBSD: the suite under a genuinely different kernel + libc, in a VM.
+  test-freebsd:
+    name: Test (FreeBSD, portable suite + heavy pipeline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run in FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: pkg install -y python314
+          run: |
+            python3.14 -X faulthandler tests/tests.py -v
+            python3.14 -X faulthandler tests/replay_tests.py -v
+            python3.14 -X faulthandler tests/ci_tests.py
+
+  # Windows: the external oracle. The portable suite runs (its Linux-only
+  # mount-detection class self-skips), then win_github_ci.py frames each
+  # fabricated volume as a fixed VHD, Mount-DiskImage attaches it read-only,
+  # and real chkdsk renders the verdict — no QEMU, no installed guest image.
+  test-windows:
+    name: Test (Windows, portable suite + native chkdsk oracle)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Portable suite
+        run: python -X faulthandler tests/tests.py -v
+
+      # Native chkdsk over a read-only VHD mount: the clean/repaired/corrupt
+      # triad, plus (in replay_tests) chkdsk's verdict on a replayed volume.
+      - name: Native chkdsk oracle
+        run: python -X faulthandler tests/win_github_ci.py -v
+
+      - name: Replay engine + chkdsk verdict
+        run: python -X faulthandler tests/replay_tests.py -v
