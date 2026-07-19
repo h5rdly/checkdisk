@@ -751,10 +751,13 @@ class NtfsDirentFixTests(unittest.TestCase):
         self.assertIn('DRY RUN', proc.stdout)
         self.assertEqual(self.img.md5(), before, 'dry run must not write')
 
-        # --really: fixes everything, exits 0
+        # --really: fixes everything, exits 0. The record/bitmap issue is the
+        # record-free fabrication's other half: freeing the record left its
+        # $MFT $BITMAP bit set, which the bitmap reconciliation now repairs.
         proc = self._cli('/f', self.img.path, '--really')
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn('2 dangling entries, 1 torn index; 3 fixed, 0 remaining',
+        self.assertIn('2 dangling entries, 1 torn index, '
+                      '1 record/bitmap issue(s); 4 fixed, 0 remaining',
                       proc.stdout)
 
         # volume is clean now: /f exits 0 and the driver agrees
@@ -1768,6 +1771,126 @@ class NtfsDirentFixTests(unittest.TestCase):
         self.assertEqual(names, expect)
         self.assertEqual(len(names), len(set(names)))
         self.assertEqual(bad, [])
+
+
+class ListCommandTests(unittest.TestCase):
+    '''`checkdisk.py list` — NTFS discovery by raw partition-table scan.
+
+       Every shape is an image file, so this is cross-platform and needs no
+       device access: a bare volume, an MBR-framed one, a GPT one, an
+       extended-partition (EBR chain) one, and dirty/damaged states.'''
+
+    def setUp(self) -> None:
+        self.img = NtfsImage()
+        self.addCleanup(self.img.dispose)
+        self.img.populate({'docs/a.txt': b'hi\n'})
+
+    def _list(self, path: str) -> str:
+        proc = subprocess.run(
+            [sys.executable,
+             os.path.join(os.path.dirname(_here), 'checkdisk.py'), 'list', path],
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return proc.stdout
+
+    def _tmp(self, blob: bytes) -> str:
+        fd, path = tempfile.mkstemp(suffix='.img', prefix='ndf-list-')
+        with os.fdopen(fd, 'wb') as fh:
+            fh.write(blob)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        return path
+
+    def test_bare_volume(self) -> None:
+        out = self._list(self.img.path)
+        self.assertIn('ntfs', out)
+        self.assertIn('clean', out)
+        self.assertIn('1 NTFS volume(s)', out)
+
+    def test_mbr_framed_volume(self) -> None:
+        import win_github_ci
+        path = self._tmp(win_github_ci._frame_bytes(_read(self.img.path)))
+        out = self._list(path)
+        self.assertIn('partition 1 @ 0x100000', out)
+        self.assertIn('ntfs', out)
+
+    def test_gpt_volume(self) -> None:
+        import zlib
+        vol = _read(self.img.path)
+        start, vs = 2048, len(vol) // 512
+        total = start + vs + 64
+        blob = bytearray(total * 512)
+        blob[0x1BE + 4] = 0xEE                          # protective MBR
+        struct.pack_into('<II', blob, 0x1BE + 8, 1, total - 1)
+        blob[510:512] = b'\x55\xaa'
+        entry = bytearray(128)                          # one Basic-Data entry
+        entry[0:16] = bytes(range(16))
+        entry[16:32] = bytes(range(16, 32))
+        struct.pack_into('<QQ', entry, 32, start, start + vs - 1)
+        entry[56:56 + 8] = 'data'.encode('utf-16-le')
+        blob[1024:1024 + 128] = entry
+        hdr = bytearray(92)                             # primary header, LBA 1
+        hdr[0:8] = b'EFI PART'
+        struct.pack_into('<Q', hdr, 72, 2)              # entries at LBA 2
+        struct.pack_into('<II', hdr, 80, 1, 128)
+        struct.pack_into('<I', hdr, 88, zlib.crc32(entry) & 0xFFFFFFFF)
+        struct.pack_into('<I', hdr, 16, zlib.crc32(hdr) & 0xFFFFFFFF)
+        blob[512:512 + 92] = hdr
+        blob[start * 512:start * 512 + len(vol)] = vol
+        out = self._list(self._tmp(bytes(blob)))
+        self.assertIn(f'partition 1 @ {start * 512:#x}', out)
+        self.assertIn('[data]', out)
+
+    def test_extended_partition_chain(self) -> None:
+        # one primary extended (0x0F) holding two logical NTFS partitions,
+        # each behind its own EBR — the chain walk must find both as 5 and 6
+        vol = _read(self.img.path)
+        vs = len(vol) // 512
+        l1, e2 = 64, 64 + vs
+        l2 = e2 + 64
+        total = 2048 + l2 + vs + 64
+        blob = bytearray(total * 512)
+        blob[0x1BE + 4] = 0x0F
+        struct.pack_into('<II', blob, 0x1BE + 8, 2048, total - 2048)
+        blob[510:512] = b'\x55\xaa'
+
+        def ebr(lba, log_rel, nxt_rel, nxt_sz):
+            off = lba * 512
+            blob[off + 0x1BE + 4] = 0x07
+            struct.pack_into('<II', blob, off + 0x1BE + 8, log_rel, vs)
+            if nxt_sz:
+                blob[off + 0x1BE + 16 + 4] = 0x05
+                struct.pack_into('<II', blob, off + 0x1BE + 16 + 8, nxt_rel, nxt_sz)
+            blob[off + 510:off + 512] = b'\x55\xaa'
+
+        ebr(2048, l1, e2, vs + 64)
+        ebr(2048 + e2, 64, 0, 0)
+        blob[(2048 + l1) * 512:(2048 + l1) * 512 + len(vol)] = vol
+        blob[(2048 + l2) * 512:(2048 + l2) * 512 + len(vol)] = vol
+        out = self._list(self._tmp(bytes(blob)))
+        self.assertIn('partition 5 @', out)
+        self.assertIn('partition 6 @', out)
+        self.assertIn('2 NTFS volume(s)', out)
+
+    def test_dirty_volume_flagged(self) -> None:
+        v = checkdisk.RawVolumeRW(self.img.path)
+        v._set_dirty(True)
+        v._was_dirty = True                             # close() must not clear
+        v.close()
+        out = self._list(self.img.path)
+        self.assertIn('DIRTY', out)
+
+    def test_damaged_ntfs_still_listed(self) -> None:
+        blob = bytearray(_read(self.img.path))
+        mft_lcn = struct.unpack_from('<Q', blob, 48)[0]
+        csz = _geometry(self.img.path)[2]
+        blob[mft_lcn * csz:mft_lcn * csz + 4096] = b'\xde\xad' * 2048
+        out = self._list(self._tmp(bytes(blob)))
+        self.assertIn('DAMAGED', out)
+        self.assertIn('repair candidate', out)
+
+    def test_non_ntfs_reports_nothing(self) -> None:
+        out = self._list(self._tmp(b'\0' * 65536))
+        self.assertIn('no NTFS', out)
 
 
 if __name__ == '__main__':

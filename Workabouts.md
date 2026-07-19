@@ -146,11 +146,18 @@ titlecase forms.
 - **`$LogFile`** is a metadata write-ahead log. This tool — like chkdsk —
   **resets it rather than replaying it** (`reset_logfile` fills it with
   `0xFF`): the structural checks reconcile the on-disk state directly, which
-  makes replay redundant, and a reset log is unambiguously clean.
+  makes replay redundant, and a reset log is unambiguously clean. The reset
+  happens as `/f --really`'s **final step, and only when every finding above
+  it converged** — an unresolved finding leaves the log and flag alone so the
+  next mount still triggers a full check.
 - The **dirty bit** lives in `$Volume`'s `$VOLUME_INFORMATION` (flags bit 0).
   The write engine *sets it on open and clears it on clean close*
   (`RawVolumeRW.__init__`/`close`) so that a crash mid-repair leaves the
-  volume flagged for a full check — the same discipline the driver uses.
+  volume flagged for a full check — the same discipline the driver uses. A
+  volume that arrives *already* flagged (a crashed session) is itself a
+  finding: the flag is not cosmetic — Windows re-checks a dirty volume at
+  boot, and Linux's ntfs3 **refuses to mount one at all** — so a repair that
+  fixes every structure but leaves the flag set has not finished the job.
 - **`$UsnJrnl`** (`\$Extend\$UsnJrnl`) is the *user-visible* change journal:
   `$Max` (32 bytes: max size, allocation delta, journal id, LowestValidUsn)
   and `$J`, an append-only sparse stream whose **byte offset is the USN**.

@@ -939,6 +939,10 @@ class RawVolume:
         total = in_use = dirs = torn = 0
         problems: list[dict] = []
         used = bytearray((nc + 7) // 8) if want_used else None
+        # per-RECORD in-use bits (for the $MFT $BITMAP reconciliation) — not
+        # to be confused with `used`, which is the per-CLUSTER map for stage 5
+        n_slots = self._mft_size // rec_size
+        rec_used = bytearray((n_slots + 7) // 8) if want_used else None
         map_failures: list[str] = []
         sec_refs: dict[int, list[int]] = {}
         reparse_recs: set[int] = set()
@@ -963,10 +967,15 @@ class RawVolume:
                     if struct.unpack_from('<H', raw, 22)[0] & 1 and want_used:
                         map_failures.append(f'record {rec_no}: torn but in use — '
                                             'its clusters are unknowable')
+                        # keep its bitmap bit set: clearing a slot that still
+                        # claims in-use would invite reuse under a live record
+                        rec_used[rec_no >> 3] |= 1 << (rec_no & 7)
                     continue
                 flags = struct.unpack_from('<H', rec, 22)[0]
                 in_use += flags & 1
                 dirs += bool(flags & 1) and bool(flags & 2)
+                if flags & 1 and want_used:
+                    rec_used[rec_no >> 3] |= 1 << (rec_no & 7)
                 if not flags & 1:
                     continue
                 frozen = bytes(rec)
@@ -1069,6 +1078,7 @@ class RawVolume:
                 for fn in _file_name_attrs(prob.pop('frozen'))) or '(no name)'
         return {'total': total, 'in_use': in_use, 'dirs': dirs, 'torn': torn,
                 'runlist_problems': problems, 'used': used,
+                'rec_used': rec_used, 'n_slots': n_slots,
                 'map_failures': map_failures, 'sec_refs': sec_refs,
                 'reparse_recs': reparse_recs, 'objid_recs': objid_recs}
 
@@ -1288,6 +1298,19 @@ class RawVolume:
     def _dirty_flag(self) -> bool:
         rec, off = self._volume_info()
         return bool(struct.unpack_from('<H', rec, off)[0] & 1)
+
+    def volume_label(self) -> str:
+        '''$VOLUME_NAME (0x60) of $Volume — UTF-16LE, may be absent (no label).'''
+        rec = self._load_record(3)
+        if rec is None:
+            return ''
+        for a, t, _ln in _attrs(rec):
+            if t == 0x60 and rec[a + 8] == 0:
+                vlen = struct.unpack_from('<I', rec, a + 16)[0]
+                vofs = struct.unpack_from('<H', rec, a + 20)[0]
+                return bytes(rec[a + vofs:a + vofs + vlen]).decode('utf-16-le',
+                                                                   'replace')
+        return ''
 
     # -- primitives --
 
@@ -1924,6 +1947,27 @@ class RawVolumeRW(RawVolume):
             write(bytes(new))
             return rec_no
         raise NtfsError(errno.ENOSPC, 'no free MFT records (growth unimplemented)')
+
+    def apply_mft_bitmap(self, used: bytes, nbits: int) -> int:
+        '''Rewrite $MFT's $BITMAP so bit i matches record i's surveyed in-use
+           flag, for records [0, nbits); bits past nbits keep their on-disk
+           value. The crash shape this repairs: alloc_record's bitmap write
+           reached the disk but the record write never did — a leaked set bit
+           that chkdsk reports as "the MFT BITMAP attribute is incorrect".'''
+        bm, write = self._mft_bitmap()
+        new = bytearray(bm)
+        changed = 0
+        for i in range(min(nbits, len(new) * 8)):
+            want = bool(used[i >> 3] & (1 << (i & 7)))
+            if bool(new[i >> 3] & (1 << (i & 7))) != want:
+                changed += 1
+                if want:
+                    new[i >> 3] |= 1 << (i & 7)
+                else:
+                    new[i >> 3] &= ~(1 << (i & 7)) & 0xFF
+        if changed:
+            write(bytes(new))
+        return changed
 
     def free_record(self, rec_no: int) -> None:
         bm, write = self._mft_bitmap()
@@ -3459,6 +3503,46 @@ def full_fix(device: str, really: bool, surface: bool = False,
                 extra_failed += 1
                 print(f'    FIX FAILED: {exc}')
 
+        # $MFT's own $BITMAP (bit i = record i allocated): a crash between the
+        # bitmap write and the record write leaks set bits — chkdsk's "the
+        # master file table's (MFT) BITMAP attribute is incorrect". Reconcile
+        # against the records' surveyed in-use flags, the on-disk truth.
+        print('mft record bitmap: verifying ...')
+        mft_bmp = bytes(vol._read_whole_attr(0, AT_BITMAP, None, None) or b'')
+        rec_used = survey['rec_used']
+        nbits = min(survey['n_slots'], len(mft_bmp) * 8)
+        mft_mism = [i for i in range(nbits)
+                    if bool(rec_used[i >> 3] & (1 << (i & 7)))
+                    != bool(mft_bmp[i >> 3] & (1 << (i & 7)))]
+        if len(mft_bmp) * 8 < survey['n_slots']:
+            extra_issues += 1
+            print(f'!   $BITMAP covers {len(mft_bmp) * 8} of '
+                  f'{survey["n_slots"]} record slots — truncated (report-only)')
+            if really:
+                extra_failed += 1
+        if mft_mism:
+            extra_issues += 1
+            print(f'!   {len(mft_mism)} record(s) disagree with the bitmap '
+                  f'(first: {mft_mism[:8]})')
+            if not really:
+                print('    (repairable: --really rewrites the bitmap from the '
+                      'surveyed in-use flags)')
+            else:
+                n = vol.apply_mft_bitmap(rec_used, nbits)
+                again = bytes(vol._read_whole_attr(0, AT_BITMAP, None, None)
+                              or b'')
+                left = [i for i in range(nbits)
+                        if bool(rec_used[i >> 3] & (1 << (i & 7)))
+                        != bool(again[i >> 3] & (1 << (i & 7)))]
+                if left:
+                    extra_failed += 1
+                    print('    REWRITE VERIFY FAILED')
+                else:
+                    extra_fixed += 1
+                    print(f'    bitmap rewritten ({n} bit(s) corrected)')
+        else:
+            print('  consistent')
+
         print('stage 2: examining directory indexes ...')
         walked = dangling = torn = fixed = failed = 0
         stack, seen = [('/', FILE_ROOT)], {FILE_ROOT}
@@ -3801,6 +3885,177 @@ def do_backup(device: str, outdir: str, dirs: list[str]) -> int:
     return 0
 
 
+# ── partition discovery: `list` (raw table scan, nothing is mounted) ─────────
+
+def _human(n: int) -> str:
+    for unit in ('B', 'KiB', 'MiB', 'GiB', 'TiB'):
+        if n < 1024 or unit == 'TiB':
+            return f'{n:.1f} {unit}' if unit != 'B' else f'{n} B'
+        n /= 1024
+
+
+def _parse_partitions(fd) -> list[dict]:
+    '''Parse the device's partitioning from raw sector reads: a bare NTFS
+       volume (no table), an MBR (incl. the EBR chain of logical partitions),
+       or a GPT behind its protective MBR. Returns [{index, offset, length,
+       kind, name}]; nothing is mounted and nothing is written.'''
+    sec0 = _pread(fd, 512, 0)
+    if len(sec0) < 512:
+        return []
+    if sec0[3:7] == b'NTFS':                       # bare volume, no table
+        bps = struct.unpack_from('<H', sec0, 11)[0] or 512
+        sectors = struct.unpack_from('<Q', sec0, 40)[0]
+        return [{'index': 0, 'offset': 0, 'length': (sectors + 1) * bps,
+                 'kind': 'bare', 'name': ''}]
+    if sec0[510:512] != b'\x55\xaa':
+        return []
+    # entry: boot flag, CHS start (3), type, CHS end (3), start LBA, sectors
+    entries = [(sec0[0x1BE + 16 * i + 4],
+                *struct.unpack_from('<II', sec0, 0x1BE + 16 * i + 8))
+               for i in range(4)]                  # (type, start_lba, sectors)
+    if any(t == 0xEE for t, _s, _n in entries):    # protective MBR → GPT
+        hdr = _pread(fd, 512, 512)
+        if hdr[:8] != b'EFI PART':
+            return []
+        arr_lba = struct.unpack_from('<Q', hdr, 72)[0]
+        num, esize = struct.unpack_from('<II', hdr, 80)
+        # clamp what a CORRUPT header can make us read: the spec minimum is
+        # 128 entries of 128 bytes; nothing sane exceeds 512 entries
+        if not 0 < esize <= 4096:
+            return []
+        num = min(num, 512)
+        blob = _pread(fd, -(-num * esize // 512) * 512, arr_lba * 512)
+        out = []
+        for i in range(num):
+            e = blob[i * esize:(i + 1) * esize]
+            if len(e) < 128 or e[:16] == b'\x00' * 16:
+                continue
+            start, end = struct.unpack_from('<QQ', e, 32)
+            name = e[56:128].decode('utf-16-le', 'replace').rstrip('\x00')
+            out.append({'index': i + 1, 'offset': start * 512,
+                        'length': (end - start + 1) * 512,
+                        'kind': 'gpt', 'name': name})
+        return out
+    out = []
+    for i, (ptype, start, sectors) in enumerate(entries):
+        if not ptype:
+            continue
+        if ptype in (0x05, 0x0F, 0x85):            # extended → walk the EBRs
+            link, idx = 0, 5
+            seen = set()                           # corrupt chains can cycle
+            while link not in seen and len(seen) < 128:
+                seen.add(link)
+                ebr = _pread(fd, 512, (start + link) * 512)
+                if len(ebr) < 512 or ebr[510:512] != b'\x55\xaa':
+                    break
+                t0 = ebr[0x1BE + 4]
+                s0, n0 = struct.unpack_from('<II', ebr, 0x1BE + 8)
+                if t0:
+                    out.append({'index': idx,
+                                'offset': (start + link + s0) * 512,
+                                'length': n0 * 512, 'kind': 'mbr',
+                                'name': f'type {t0:#04x}'})
+                    idx += 1
+                t1 = ebr[0x1BE + 16 + 4]
+                s1 = struct.unpack_from('<I', ebr, 0x1BE + 16 + 8)[0]
+                if not t1:
+                    break
+                link = s1                          # next EBR, extended-relative
+            continue
+        out.append({'index': i + 1, 'offset': start * 512,
+                    'length': sectors * 512, 'kind': 'mbr',
+                    'name': f'type {ptype:#04x}'})
+    return out
+
+
+def _candidate_devices() -> list[str]:
+    '''Whole-disk device nodes to scan when none were given. Read-only probes;
+       missing/unopenable candidates are simply skipped.'''
+    if sys.platform.startswith('linux'):
+        try:
+            return ['/dev/' + n for n in sorted(os.listdir('/sys/block'))
+                    if not n.startswith(('ram', 'zram'))]
+        except OSError:
+            return []
+    if sys.platform == 'win32':
+        return ['\\\\.\\PhysicalDrive' + str(i) for i in range(16)]
+    if sys.platform == 'darwin':
+        import re
+        return ['/dev/' + n for n in sorted(os.listdir('/dev'))
+                if re.fullmatch(r'disk\d+', n)]
+    import re                                       # the BSDs
+    return ['/dev/' + n for n in sorted(os.listdir('/dev'))
+            if re.fullmatch(r'(ada|da|vtbd|nvd|nda)\d+', n)]
+
+
+def list_volumes(devices: list[str] | None) -> int:
+    '''`list`: find NTFS partitions by reading partition tables + boot sectors
+       straight off the devices — nothing needs to be (or gets) mounted. With
+       no arguments, scans the platform's whole-disk devices; arguments may be
+       device nodes or image files.'''
+    explicit = devices is not None
+    found = 0
+    for dev in (devices if explicit else _candidate_devices()):
+        try:
+            fd = os.open(dev, os.O_RDONLY | _O_BINARY)
+        except FileNotFoundError:
+            if explicit:
+                print(f'{dev}: not found')
+            continue
+        except (PermissionError, OSError) as exc:
+            print(f'{dev}: cannot open read-only ({exc.strerror or exc}) — '
+                  'root/admin is needed for raw device reads')
+            continue
+        try:
+            parts = _parse_partitions(fd)
+        finally:
+            os.close(fd)
+        if not parts:
+            if explicit:
+                print(f'{dev}: no NTFS boot sector and no partition table')
+            continue
+        for p in parts:
+            try:
+                boot = None
+                fd = os.open(dev, os.O_RDONLY | _O_BINARY)
+                try:
+                    boot = _pread(fd, 512, p['offset'])
+                finally:
+                    os.close(fd)
+            except OSError:
+                continue
+            if boot[3:7] != b'NTFS':
+                continue
+            found += 1
+            state = 'unreadable'
+            label = ''
+            try:
+                # the engine's own open-time dirty warning (stderr) is
+                # redundant here — the row already says DIRTY
+                import contextlib, io
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with RawVolume(dev, base=p['offset']) as v:
+                        label = v.volume_label()
+                        dirty = v._dirty_flag()
+                state = ('DIRTY — a crashed session; /f repairs'
+                         if dirty else 'clean')
+            except (NtfsError, OSError) as exc:
+                state = f'DAMAGED ({exc}) — a repair candidate'
+            where = ('' if p['kind'] == 'bare'
+                     else f'  partition {p["index"]} @ {p["offset"]:#x}')
+            name = f' [{p["name"]}]' if p['name'] and p['kind'] == 'gpt' else ''
+            print(f'{dev}{where}  ntfs  '
+                  + (f'{label!r}  ' if label else '')
+                  + f'{_human(p["length"])}{name}  {state}')
+    if not found:
+        print('no NTFS volumes found' + ('' if explicit else
+              ' (no read access to any disk? try with root/admin)'))
+    else:
+        print(f'-- {found} NTFS volume(s); this listing mounted nothing and '
+              'wrote nothing')
+    return 0
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -3872,7 +4127,15 @@ def main() -> int:
     p_secure.add_argument('device')
     p_secure.add_argument('--really', action='store_true', help='actually write; default is dry-run')
 
+    p_list = sub.add_parser('list', help='find NTFS partitions: raw partition-table + '
+                                         'boot-sector scan of the local disks (or the '
+                                         'given devices/images); mounts nothing')
+    p_list.add_argument('devices', nargs='*',
+                        help='devices or image files to scan (default: all local disks)')
+
     args = parser.parse_args()
+    if args.cmd == 'list':      # read-only by construction; may target mounted disks
+        return list_volumes(args.devices or None)
     if args.cmd in ('/r', '/R'):
         args.surface = True
     if args.cmd in ('/f', '/F', '/r', '/R'):
