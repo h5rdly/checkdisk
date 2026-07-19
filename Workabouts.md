@@ -65,6 +65,14 @@ record is **torn** (`_apply_fixups` / inverse `_seal_fixups`). Torn = the
 strongest possible corruption signal: the structure's content cannot be
 trusted at all.
 
+The seal/unseal pair is also a bug magnet for anything that *writes* these
+structures, and the failure has a recognizable fingerprint. Re-seal a buffer
+that was never unsealed and the stale USN gets captured into the USA as if it
+were data: exactly two garbage bytes at each sector-tail offset (0x1FE, 0x3FE,
+…), typically equal to a recent USN, with every other byte intact. Corruption
+confined to those offsets means a mis-sealed writer, not random damage — worth
+checking before blaming the disk.
+
 ### Attributes
 
 A record's content is a chain of **attributes** (`_attrs` walks it): each has a
@@ -177,7 +185,26 @@ flush-time concern. So a redo that lays down a fresh INDX block writes a logical
 page, and a *later* redo against it must accept that logical form (its fixup
 check 'fails' because tails ≠ USN — expected, not a torn page) and re-seal only
 on write-back. A replayer that demands a sealed on-disk block at every step
-silently drops those ops. Two more traps: the **v2 log relocates the record-page
+silently drops those ops.
+
+The same rule governs the **read side**, and getting it wrong there is much
+quieter. Target FILE records must be loaded in logical form too (fixups
+applied), because log ops describe the unsealed image and the write path
+re-seals on flush. Modify a still-sealed buffer and the re-seal captures the
+*old* USN into the USA as if it were data: every field that straddles a
+sector-tail offset (0x1FE / 0x3FE of a 1 KiB record) silently gains two garbage
+bytes, and everything else stays perfect. On a real crash volume this surfaced
+as `$Extend\$RmMetadata\$Repair:$Verify` claiming `allocated_size =
+0x19 << 48 | true size` — the leaked USN sitting in the high bytes — plus
+phantom dangling entries and bitmap drift in other records whose structures
+happened to cross a tail. The bug carried a second lesson: **Windows 10's
+chkdsk passed the damaged volume; Windows Server 2022's flagged it — and this
+tool's own checker had flagged it all along.** "chkdsk-clean" is a floor, not a
+proof, and the floor's height depends on which chkdsk; when a strict checker
+and a lenient oracle disagree, suspect the oracle's leniency before the
+checker's pedantry.
+
+Two more traps: the **v2 log relocates the record-page
 header** — its logical file offset is at 0x3C and last-end LSN at 0x20, so the
 0x18 "first free byte" field some parsers read is v1-shaped and truncates a v2
 walk; and a **dry run applies nothing** (redo/undo only run when you commit), so

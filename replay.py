@@ -92,8 +92,8 @@ class Op:
     TransactionTableDump = 0x20
     UpdateRecordDataRoot = 0x21
     UpdateRecordDataAllocation = 0x22
-    UpdateRelativeDataInIndex = 0x23     # newer view-index ops; ntfs3 doesn't
-    UpdateRelativeDataInIndex2 = 0x24    # apply these — treated as unsupported
+    UpdateRelativeDataInIndex = 0x23     # newer view-index ops
+    UpdateRelativeDataInIndex2 = 0x24    
     ZeroEndOfFileRecord = 0x25
 
 

@@ -40,6 +40,13 @@ jobs:
         timeout-minutes: 5
         run: python -X faulthandler tests/replay_tests.py -v
 
+      # Hard-poweroff simulation: replay a prefix of the engine's write
+      # journal with the in-flight write torn at sector level, 10 seeded cut
+      # points; checkdisk must repair each to clean with pre-cut data intact.
+      - name: Crash consistency
+        timeout-minutes: 10
+        run: python -X faulthandler tests/crash_tests.py -v
+
       # The "crashed-volume rehearsal": one image, thousands of files, every
       # corruption class at once, full /f --really, canary checksums back
       # through the tool's own readers. Catches walk-order / cache-interaction
@@ -66,6 +73,13 @@ jobs:
         timeout-minutes: 5
         run: python -X faulthandler tests/replay_tests.py -v
 
+      # Hard-poweroff simulation: replay a prefix of the engine's write
+      # journal with the in-flight write torn at sector level, 10 seeded cut
+      # points; checkdisk must repair each to clean with pre-cut data intact.
+      - name: Crash consistency
+        timeout-minutes: 10
+        run: python -X faulthandler tests/crash_tests.py -v
+
       - name: Heavy pipeline
         timeout-minutes: 15
         run: python -X faulthandler tests/ci_tests.py
@@ -86,6 +100,9 @@ jobs:
       - name: Replay engine
         run: python3 -X faulthandler tests/replay_tests.py -v
 
+      - name: Crash consistency
+        run: python3 -X faulthandler tests/crash_tests.py -v
+
   # FreeBSD: the suite under a genuinely different kernel + libc, in a VM.
   test-freebsd:
     name: Test (FreeBSD, portable suite + heavy pipeline)
@@ -100,6 +117,7 @@ jobs:
           run: |
             python3.14 -X faulthandler tests/tests.py -v
             python3.14 -X faulthandler tests/replay_tests.py -v
+            python3.14 -X faulthandler tests/crash_tests.py -v
             python3.14 -X faulthandler tests/ci_tests.py
 
   # Windows: the external oracle. The portable suite runs (its Linux-only
@@ -125,3 +143,9 @@ jobs:
 
       - name: Replay engine + chkdsk verdict
         run: python -X faulthandler tests/replay_tests.py -v
+
+      # 10 seeded hard-poweroff crashes; each repaired volume must also pass
+      # native chkdsk (the per-seed VHD mount is the run's main cost).
+      - name: Crash consistency + chkdsk verdicts
+        timeout-minutes: 15
+        run: python -X faulthandler tests/crash_tests.py -v

@@ -552,7 +552,17 @@ def populate(path: str, files: dict[str, bytes],
             if rel in made:
                 return made[rel]
             parent = ensure_dir(os.path.dirname(rel))
-            no = _mkfile(v, parent, os.path.basename(rel), None)
+            name = os.path.basename(rel)
+            # Incremental populate: reuse a directory that already exists on
+            # disk. The check must happen BEFORE _mkfile — its index insert is
+            # what raises EEXIST, by which point the record is already
+            # allocated and written, and the except-path would leak an orphan.
+            for e in v.scan_dir('/' + os.path.dirname(rel)):
+                if e['status'] == 'ok' and e['name'] == name:
+                    no = e['record']
+                    break
+            else:
+                no = _mkfile(v, parent, name, None)
             made[rel] = no
             return no
 

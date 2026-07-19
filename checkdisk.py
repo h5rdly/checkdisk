@@ -1273,6 +1273,22 @@ class RawVolume:
             os.close(self._fd)
             self._fd = None
 
+    # -- dirty flag: $VOLUME_INFORMATION (0x70) of $Volume (record 3) --
+
+    def _volume_info(self):
+        rec = self._load_record(3)
+        if rec is None:
+            raise NtfsError(errno.EIO, '$Volume record unreadable')
+        for a, t, _ln in _attrs(rec):
+            if t == 0x70 and rec[a + 8] == 0:
+                v_ofs = struct.unpack_from('<H', rec, a + 20)[0]
+                return rec, a + v_ofs + 10  # u16 flags inside the value
+        raise NtfsError(errno.ENOENT, '$VOLUME_INFORMATION not found')
+
+    def _dirty_flag(self) -> bool:
+        rec, off = self._volume_info()
+        return bool(struct.unpack_from('<H', rec, off)[0] & 1)
+
     # -- primitives --
 
     def _dev_read(self, offset: int, size: int) -> bytes:
@@ -1640,21 +1656,7 @@ class RawVolumeRW(RawVolume):
             self._set_dirty(False)  # clean close: clear only what we set
         super().close()
 
-    # -- dirty flag: $VOLUME_INFORMATION (0x70) of $Volume (record 3) --
-
-    def _volume_info(self):
-        rec = self._load_record(3)
-        if rec is None:
-            raise NtfsError(errno.EIO, '$Volume record unreadable')
-        for a, t, _ln in _attrs(rec):
-            if t == 0x70 and rec[a + 8] == 0:
-                v_ofs = struct.unpack_from('<H', rec, a + 20)[0]
-                return rec, a + v_ofs + 10  # u16 flags inside the value
-        raise NtfsError(errno.ENOENT, '$VOLUME_INFORMATION not found')
-
-    def _dirty_flag(self) -> bool:
-        rec, off = self._volume_info()
-        return bool(struct.unpack_from('<H', rec, off)[0] & 1)
+    # -- dirty flag write side ($VOLUME_INFORMATION probe lives in RawVolume) --
 
     def _set_dirty(self, on: bool) -> None:
         rec, off = self._volume_info()
@@ -3689,6 +3691,38 @@ def full_fix(device: str, really: bool, surface: bool = False,
             if really:
                 extra_failed += 1
                 print('    report-only (rebuild-from-records is a future repair)')
+
+        # -- crashed-session residue: the dirty flag + stale $LogFile --
+        # chkdsk /f ends by resetting the log and clearing the dirty bit; a
+        # volume left flagged is re-checked by Windows at boot and refused
+        # outright by Linux ntfs3. Safe only once every finding above was
+        # repaired — anything unresolved keeps the flag (and the recheck).
+        # In --really mode the flag reads set because RawVolumeRW itself sets
+        # it on open, so the pre-existing state is _was_dirty.
+        print('dirty flag / $LogFile: ...')
+        if (vol._was_dirty if really else vol._dirty_flag()):
+            extra_issues += 1
+            print('!   volume is marked dirty (crashed session; $LogFile not clean)')
+            unresolved = (dangling + torn + extra_issues - 1) - (fixed + extra_fixed)
+            if not really:
+                print('    (repairable: --really resets $LogFile and clears the '
+                      'flag once every finding above is repaired)')
+            elif unresolved:
+                extra_failed += 1
+                print(f'    left dirty: {unresolved} finding(s) unresolved — '
+                      'the next mount should still trigger a full check')
+            else:
+                vol.reset_logfile()
+                vol.clear_dirty()
+                if vol._dirty_flag():
+                    extra_failed += 1
+                    print('    CLEAR VERIFY FAILED')
+                else:
+                    extra_fixed += 1
+                    print('    $LogFile reset (0xff) + dirty flag cleared — '
+                          'the volume mounts clean')
+        else:
+            print('  clean')
 
     issues = dangling + torn + extra_issues
     fixed += extra_fixed
