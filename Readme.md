@@ -9,10 +9,10 @@ atomicity.
 ## Install
 
 ```
-pip install checkdisk       
+pip install checkdisk
 ```
 
-Or skip installing — `checkdisk.py` is self contained
+Or download `checkdisk.py` and run via `python checkdisk.py xx` 
 
 ## Quick start
 
