@@ -50,6 +50,9 @@ from __future__ import annotations
 import argparse, array, bisect, errno, hashlib, os, struct, subprocess, sys, time
 
 
+__version__ = '0.1.0'     
+
+
 # Positioned I/O. os.pread/os.pwrite are POSIX-only; on Windows fall back to
 # lseek + read/write — the tool is single-threaded, so the atomicity a real
 # pread would give over a separate seek is moot here. _O_BINARY keeps Windows

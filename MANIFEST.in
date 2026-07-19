@@ -1,0 +1,7 @@
+# sdist carries everything needed to run the full suite from source;
+# the wheel ships only checkdisk (see pyproject py-modules).
+include format.py
+include replay.py
+include Workabouts.md
+graft tests
+global-exclude __pycache__ *.pyc

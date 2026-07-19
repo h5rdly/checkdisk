@@ -1,11 +1,33 @@
+[build-system]
+requires = ["setuptools>=83"]
+build-backend = "setuptools.build_meta"
+
+
 [project]
 name = "checkdisk"
-version = "0.0.1"
-description = "Dependency-free NTFS repair tool"
+dynamic = ["version"]
+description = "Dependency-free NTFS repair tool — the chkdsk /f flow on raw devices and images"
 readme = "Readme.md"
 license = "0BSD"
 requires-python = ">=3.13"
+keywords = ["ntfs", "chkdsk", "filesystem", "repair", "recovery", "forensics", "mft"]
+classifiers = [
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: System :: Filesystems",
+    "Topic :: System :: Recovery Tools",
+]
 
 
 [project.urls]
 Homepage = "https://github.com/h5rdly/checkdisk"
+
+[project.scripts]
+checkdisk = "checkdisk:main"
+
+[tool.setuptools]
+py-modules = ["checkdisk"]
+
+[tool.setuptools.dynamic]
+version = {attr = "checkdisk.__version__"}
