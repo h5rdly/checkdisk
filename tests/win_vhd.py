@@ -1,14 +1,17 @@
-#!/usr/bin/env python3
-r'''Attach a VHD read-only and hand back a drive letter — pure ctypes/virtdisk.dll.
+'''Attach a VHD and hand back a drive letter for chkdsk — pure ctypes/virtdisk.dll.
 
 The Windows chkdsk oracle needs each fabricated volume presented to Windows as a
 lettered drive. PowerShell can do it (Mount-DiskImage), but Get-Disk enumerates
 the CIM store asynchronously and races a freshly attached image
 (CmdletizationQuery_NotFound). virtdisk.dll avoids that: OpenVirtualDisk +
-AttachVirtualDisk attach the image, GetVirtualDiskPhysicalPath returns
-\\.\PhysicalDriveN straight from the handle (no CIM), then we find that disk's
-volume by matching disk extents and give it a letter — reusing an automount
-letter if one appeared, otherwise assigning a free one ourselves.
+AttachVirtualDisk attach the image and GetVirtualDiskPhysicalPath returns
+\\.\PhysicalDriveN straight from the handle (no CIM). AttachVirtualDisk leaves
+the disk OFFLINE under Windows Server's SAN policy, so we clear its OFFLINE
+attribute to surface the volume, match it by disk extents, and give it a letter
+(reusing an automount letter if one appeared, else assigning a free one).
+
+The attach is read-write (required to online the disk), but the oracle only ever
+runs read-only chkdsk, so the volume bytes are never modified.
 
 Windows-only, but every Win32 DLL is loaded lazily inside the functions, so the
 module still imports on other platforms (its callers are skipped there anyway).
@@ -16,10 +19,7 @@ module still imports on other platforms (its callers are skipped there anyway).
 
 from __future__ import annotations
 
-import contextlib
-import ctypes
-import string
-import time
+import contextlib, ctypes, string, time
 from ctypes import wintypes
 
 
@@ -130,7 +130,7 @@ def _attach(virtdisk, k, vhd_path: str) -> wintypes.HANDLE:
     st.DeviceId = _STORAGE_TYPE_VHD
     st.VendorId = (ctypes.c_ubyte * 16)(*_MS_VENDOR)
     handle = wintypes.HANDLE()
-    rc = virtdisk.OpenVirtualDisk(ctypes.byref(st), vhd_path, _ACCESS_READ,
+    rc = virtdisk.OpenVirtualDisk(ctypes.byref(st), vhd_path, _ACCESS_ALL,
                                   _OPEN_FLAG_NONE, None, ctypes.byref(handle))
     if rc:
         raise ctypes.WinError(rc, f'OpenVirtualDisk({vhd_path})')
