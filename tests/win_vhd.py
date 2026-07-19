@@ -44,17 +44,31 @@ class _VOLUME_DISK_EXTENTS(ctypes.Structure):
                 ('Extents', _DISK_EXTENT * 8)]
 
 
+class _SET_DISK_ATTRIBUTES(ctypes.Structure):
+    _fields_ = [('Version', wintypes.DWORD),
+                ('Persist', ctypes.c_ubyte),
+                ('Reserved1', ctypes.c_ubyte * 3),
+                ('Attributes', ctypes.c_ulonglong),
+                ('AttributesMask', ctypes.c_ulonglong),
+                ('Reserved2', wintypes.DWORD * 4)]
+
+
 # device type VHD + vendor GUID {EC984AEC-A0F9-47e9-901F-71415A66345B}, the
 # Microsoft provider, in the mixed-endian byte order a GUID serializes to.
 _STORAGE_TYPE_VHD = 2
 _MS_VENDOR = bytes.fromhex('ec4a98ecf9a0e947901f71415a66345b')
 
-_ACCESS_READ = 0x000D0000            # VIRTUAL_DISK_ACCESS_READ = RO|DETACH|GET_INFO
+_ACCESS_ALL = 0x003F0000             # VIRTUAL_DISK_ACCESS_ALL (attach RW + info + detach)
 _OPEN_FLAG_NONE = 0
-_ATTACH_FLAG_READ_ONLY = 0x00000001
+_ATTACH_FLAG_NONE = 0
 _ATTACH_VERSION_1 = 1
 _DETACH_FLAG_NONE = 0
+
 _IOCTL_GET_DISK_EXTENTS = 0x00560000     # IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS
+_IOCTL_SET_DISK_ATTRIBUTES = 0x0007C0F4
+_IOCTL_UPDATE_PROPERTIES = 0x00070140
+_DISK_ATTRIBUTE_OFFLINE = 0x01
+_GENERIC_RW = 0xC0000000
 _INVALID_HANDLE = ctypes.c_void_p(-1).value
 
 
@@ -122,12 +136,36 @@ def _attach(virtdisk, k, vhd_path: str) -> wintypes.HANDLE:
         raise ctypes.WinError(rc, f'OpenVirtualDisk({vhd_path})')
     params = _ATTACH_PARAMS()
     params.Version = _ATTACH_VERSION_1
-    rc = virtdisk.AttachVirtualDisk(handle, None, _ATTACH_FLAG_READ_ONLY, 0,
+    rc = virtdisk.AttachVirtualDisk(handle, None, _ATTACH_FLAG_NONE, 0,
                                     ctypes.byref(params), None)
     if rc:
         k.CloseHandle(handle)
         raise ctypes.WinError(rc, 'AttachVirtualDisk')
     return handle
+
+
+def _online_disk(k, disk_number: int) -> None:
+    '''Clear the disk's OFFLINE attribute so its volume surfaces. Unlike
+       Mount-DiskImage, AttachVirtualDisk leaves a freshly attached disk OFFLINE
+       under Windows Server's default SAN policy — no partition/volume appears
+       until it is onlined. Best-effort: needs write access to the disk device
+       (hence the read-write attach), then a property refresh to re-read it.'''
+    h = k.CreateFileW(rf'\\.\PhysicalDrive{disk_number}', _GENERIC_RW, 0x3,
+                      None, 3, 0, None)
+    if h == _INVALID_HANDLE:
+        return
+    try:
+        sda = _SET_DISK_ATTRIBUTES()
+        sda.Version = ctypes.sizeof(_SET_DISK_ATTRIBUTES)
+        sda.Attributes = 0                             # OFFLINE bit cleared → online
+        sda.AttributesMask = _DISK_ATTRIBUTE_OFFLINE
+        ret = wintypes.DWORD()
+        k.DeviceIoControl(h, _IOCTL_SET_DISK_ATTRIBUTES, ctypes.byref(sda),
+                          ctypes.sizeof(sda), None, 0, ctypes.byref(ret), None)
+        k.DeviceIoControl(h, _IOCTL_UPDATE_PROPERTIES, None, 0, None, 0,
+                          ctypes.byref(ret), None)
+    finally:
+        k.CloseHandle(h)
 
 
 def _disk_number(virtdisk, handle) -> int:
@@ -191,14 +229,17 @@ def _free_letter(k) -> str:
 
 
 @contextlib.contextmanager
-def mounted_readonly(vhd_path: str):
-    '''Attach VHD_PATH read-only and yield its NTFS partition's drive letter
-       (e.g. "E"). On exit: release any letter we assigned, detach, close.'''
+def mounted(vhd_path: str):
+    '''Attach VHD_PATH, online it, and yield its NTFS partition's drive letter
+       (e.g. "E"). The attach is read-write (needed to online the disk), but the
+       caller only ever runs read-only chkdsk, so the bytes are never modified.
+       On exit: release any letter we assigned, detach, close.'''
     virtdisk, k = _virtdisk(), _kernel32()
     handle = _attach(virtdisk, k, vhd_path)
     mount_point = None
     try:
         disk = _disk_number(virtdisk, handle)
+        _online_disk(k, disk)             # Server leaves it offline — surface the volume
         vol = None
         for _ in range(40):               # the volume can surface a moment later
             vol = _volume_on_disk(k, disk)

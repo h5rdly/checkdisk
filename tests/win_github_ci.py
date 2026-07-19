@@ -109,10 +109,9 @@ def _vhd_footer(size: int) -> bytes:
 
 
 def _chkdsk(volume_path: str) -> tuple[int, str]:
-    '''Frame VOLUME_PATH as a VHD, attach it read-only via virtdisk.dll (see
-       win_vhd), and return (chkdsk_exit_code, chkdsk_output). Read-only mount +
-       read-only chkdsk means Windows' online self-healing never touches the
-       bytes, so chkdsk sees exactly what checkdisk left.'''
+    '''Frame VOLUME_PATH as a VHD, attach + online it via virtdisk.dll (see
+       win_vhd), and return (chkdsk_exit_code, chkdsk_output). We only ever run
+       read-only chkdsk, so the volume bytes are exactly what checkdisk left.'''
     import win_vhd                                     # ctypes; Windows-only
     with open(volume_path, 'rb') as fh:
         data = _frame_bytes(fh.read())
@@ -121,7 +120,7 @@ def _chkdsk(volume_path: str) -> tuple[int, str]:
         with os.fdopen(fd, 'wb') as fh:
             fh.write(data)
             fh.write(_vhd_footer(len(data)))
-        with win_vhd.mounted_readonly(vhd) as letter:
+        with win_vhd.mounted(vhd) as letter:
             proc = subprocess.run(['chkdsk', letter + ':'], capture_output=True,
                                   text=True, encoding='utf-8', errors='replace')
         return proc.returncode, (proc.stdout or '') + (proc.stderr or '')
