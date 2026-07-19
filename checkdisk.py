@@ -50,6 +50,23 @@ from __future__ import annotations
 import argparse, array, bisect, errno, hashlib, os, struct, subprocess, sys, time
 
 
+# Positioned I/O. os.pread/os.pwrite are POSIX-only; on Windows fall back to
+# lseek + read/write — the tool is single-threaded, so the atomicity a real
+# pread would give over a separate seek is moot here. _O_BINARY keeps Windows
+# from CRLF/EOF-translating a raw disk image (it is 0, a no-op, on POSIX).
+_O_BINARY = getattr(os, 'O_BINARY', 0)
+if hasattr(os, 'pread'):
+    _pread, _pwrite = os.pread, os.pwrite
+else:
+    def _pread(fd, n, offset):
+        os.lseek(fd, offset, os.SEEK_SET)
+        return os.read(fd, n)
+
+    def _pwrite(fd, data, offset):
+        os.lseek(fd, offset, os.SEEK_SET)
+        return os.write(fd, data)
+
+
 MREF_MASK = (1 << 48) - 1  # low 48 bits = record number, high 16 = sequence
 
 
@@ -1213,8 +1230,8 @@ class RawVolume:
         self.device = device
         self._upcase = None
         self._base = base       # byte offset of the volume within the device
-        self._fd = os.open(device, os.O_RDONLY)
-        boot = os.pread(self._fd, 512, self._base)
+        self._fd = os.open(device, os.O_RDONLY | _O_BINARY)
+        boot = _pread(self._fd, 512, self._base)
         if boot[3:7] != b'NTFS':
             raise NtfsError(0, f'{device}: no NTFS boot sector')
         bps = struct.unpack_from('<H', boot, 11)[0]
@@ -1259,7 +1276,7 @@ class RawVolume:
     # -- primitives --
 
     def _dev_read(self, offset: int, size: int) -> bytes:
-        return os.pread(self._fd, size, self._base + offset)
+        return _pread(self._fd, size, self._base + offset)
 
     def _runs_read(self, runs, offset: int, size: int) -> bytes:
         '''Read [offset, offset+size) of a stream laid out by vcn-ordered runs;
@@ -1281,7 +1298,7 @@ class RawVolume:
             lo, hi = max(offset, r_start), min(end, r_end)
             if lo >= hi:
                 continue
-            data = os.pread(self._fd, hi - lo, self._base + lcn * csz + (lo - r_start))
+            data = _pread(self._fd, hi - lo, self._base + lcn * csz + (lo - r_start))
             if lo == offset and hi == end:
                 return data  # common case: whole range inside one run
             if out is None:
@@ -1612,7 +1629,7 @@ class RawVolumeRW(RawVolume):
     def __init__(self, device: str, base: int = 0):
         super().__init__(device, readonly=True, base=base)
         os.close(self._fd)
-        self._fd = os.open(device, os.O_RDWR)
+        self._fd = os.open(device, os.O_RDWR | _O_BINARY)
         self._mirror = None
         self._was_dirty = self._dirty_flag()
         if not self._was_dirty:
@@ -1659,7 +1676,7 @@ class RawVolumeRW(RawVolume):
             if lo >= hi:
                 continue
             chunk = data[lo - offset:hi - offset]
-            if os.pwrite(self._fd, chunk, self._base + lcn * csz + (lo - r_start)) != len(chunk):
+            if _pwrite(self._fd, chunk, self._base + lcn * csz + (lo - r_start)) != len(chunk):
                 raise NtfsError(errno.EIO, f'short write at stream offset {lo}')
             written += len(chunk)
         if written != len(data):
@@ -3350,12 +3367,12 @@ def run_surface(device: str, vol: RawVolume, direct: bool = False) -> dict:
     fd = None
     if direct and hasattr(os, 'O_DIRECT'):
         try:
-            fd = os.open(device, os.O_RDONLY | os.O_DIRECT)
+            fd = os.open(device, os.O_RDONLY | os.O_DIRECT | _O_BINARY)
         except OSError:
             print('  (O_DIRECT refused here — using buffered reads + fadvise)')
     if fd is None:
         direct = False
-        fd = os.open(device, os.O_RDONLY)
+        fd = os.open(device, os.O_RDONLY | _O_BINARY)
     last = [0]
 
     def progress(pos: int, total: int) -> None:
@@ -3372,7 +3389,7 @@ def run_surface(device: str, vol: RawVolume, direct: bool = False) -> dict:
             return dbuf[:got]
     else:
         def pread(pos: int, count: int) -> bytes:
-            data = os.pread(fd, count, pos)
+            data = _pread(fd, count, pos)
             if hasattr(os, 'posix_fadvise'):  # don't evict the page cache
                 os.posix_fadvise(fd, pos, count, os.POSIX_FADV_DONTNEED)
             return data

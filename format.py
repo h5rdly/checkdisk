@@ -26,16 +26,12 @@ Usage:
 
 from __future__ import annotations
 
-import argparse
-import array
-import os
-import struct
-import subprocess
-import sys
-import time
+import argparse, array, os, struct, subprocess, sys, time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import checkdisk as ndf
+sys.path.insert(0, __file__.replace('\\', '/').rsplit('/', 1)[0])
+
+import checkdisk 
+
 
 SECTOR = 512
 CLUSTER = 4096
@@ -96,7 +92,7 @@ def build_sds() -> tuple[bytes, dict]:
     for sid_id, sd in ((0x100, _SD_WORLD), (0x101, _SD_ADMIN)):
         off = (len(out) + 15) & ~15
         out += b'\x00' * (off - len(out))
-        h = ndf._security_hash(sd)
+        h = checkdisk._security_hash(sd)
         entry = struct.pack('<IIQI', h, sid_id, off, 20 + len(sd)) + sd
         out += entry
         entries[sid_id] = (h, off, 20 + len(sd))
@@ -274,7 +270,7 @@ def new_record(rec_no: int, is_dir: bool = False, links: int = 1,
 
 def _add(rec: bytearray, atype: int, name: str = '', **kw) -> int:
     '''Insert an attribute via checkdisk's builder (pure record surgery).'''
-    return ndf.RawVolumeRW._add_attr(None, rec, atype,
+    return checkdisk.RawVolumeRW._add_attr(None, rec, atype,
                                      name.encode('utf-16-le'), **kw)
 
 
@@ -324,7 +320,7 @@ def format_volume(path: str, size_mib: int = 64, label: str = '',
     def alloc(n: int, at: int | None = None) -> int:
         nonlocal cursor
         lcn = cursor if at is None else at
-        ndf._set_run(bitmap, lcn, n)
+        checkdisk._set_run(bitmap, lcn, n)
         if at is None:
             cursor = lcn + n
         return lcn
@@ -513,7 +509,7 @@ def format_volume(path: str, size_mib: int = 64, label: str = '',
     mft_area = bytearray(n_rec * REC)
     for no, rec in recs.items():
         sealed = bytearray(rec)
-        ndf._seal_fixups(sealed)
+        checkdisk._seal_fixups(sealed)
         mft_area[no * REC:(no + 1) * REC] = sealed
     img[mft_lcn * CLUSTER:mft_lcn * CLUSTER + len(mft_area)] = mft_area
     img[mirr_lcn * CLUSTER:mirr_lcn * CLUSTER + 4 * REC] = mft_area[:4 * REC]
@@ -522,7 +518,7 @@ def format_volume(path: str, size_mib: int = 64, label: str = '',
         fh.write(img)
 
     # -- phase 2: the engine finishes the job --
-    with ndf.RawVolumeRW(path) as v:
+    with checkdisk.RawVolumeRW(path) as v:
         # the root is the one directory that indexes ITSELF: a '.' entry in
         # its own $I30 (drivers look it up there after any change under
         # root, and fail with EIO if it is missing)
@@ -539,7 +535,7 @@ def format_volume(path: str, size_mib: int = 64, label: str = '',
 
 def _first_fn(v, rec_no: int) -> bytes:
     rec = v._load_record(rec_no)
-    return next(ndf._file_name_attrs(bytes(rec)))
+    return next(checkdisk._file_name_attrs(bytes(rec)))
 
 
 # ── populate: create real files with the engine ──────────────────────────────
@@ -549,7 +545,7 @@ def populate(path: str, files: dict[str, bytes],
     '''Create directories and files (path -> content) on a formatted volume,
        natively: allocate records + clusters, build SI/FN/$DATA, and insert
        the names through the engine's B+ index insert.'''
-    with ndf.RawVolumeRW(path) as v:
+    with checkdisk.RawVolumeRW(path) as v:
         made: dict[str, int] = {'': R_ROOT}
 
         def ensure_dir(rel: str) -> int:
@@ -610,7 +606,7 @@ def _mkfile(v, parent_no: int, name: str, content: bytes | None) -> int:
         pos = 0
         for lcn, cnt in runs:
             chunk = content[pos:pos + cnt * CLUSTER]
-            os.pwrite(v._fd, chunk, lcn * CLUSTER)
+            checkdisk._pwrite(v._fd, chunk, lcn * CLUSTER)
             pos += len(chunk)
     v.write_record(no, rec)
     v.insert_index_entry(parent_no, no | (seq << 48), fn)
@@ -640,7 +636,7 @@ def selftest() -> int:
         if p.returncode:
             print(p.stdout)
             return 1
-        with ndf.RawVolume(path) as v:
+        with checkdisk.RawVolume(path) as v:
             names = sorted(e['name'] for e in v.scan_dir('/docs'))
             assert names == ['big.bin', 'hello.txt'], names
             assert v.scan_dir('/a/b/c')[0]['name'] == 'deep.txt'

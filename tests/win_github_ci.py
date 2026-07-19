@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 '''Native Windows chkdsk oracle — the QEMU cross-check without the VM.
 
 The portable suite (tests.py, ci_tests.py) verifies checkdisk.py with its own
@@ -22,20 +21,17 @@ is the only place a genuine chkdsk verdict enters the suite.
 
 from __future__ import annotations
 
-import os
-import struct
-import subprocess
-import sys
-import tempfile
+import os, struct, subprocess, sys, tempfile 
 import unittest
 
-_here = os.path.dirname(os.path.abspath(__file__))
+_here = __file__.replace('\\', '/').rsplit('/', 1)[0]
 sys.path.insert(0, _here)                    # tests/ (sibling fabricators)
 sys.path.insert(0, os.path.dirname(_here))   # repo root (checkdisk / format)
 
 if sys.platform == 'win32':                  # importing the fixtures pulls in
     import tests as T                        # format.py; only needed on Windows
     CHECKDISK = os.path.join(os.path.dirname(_here), 'checkdisk.py')
+
 
 SECTOR = 512
 PART_LBA = 2048                              # 1 MiB-aligned partition start

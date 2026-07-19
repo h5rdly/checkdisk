@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 '''Heavy CI pipeline test — the "Common partition rehearsal", reproducible.
 
 One larger volume, thousands of files, EVERY corruption class injected at
@@ -17,19 +16,15 @@ Deterministic via CHECKDISK_CI_SEED (default 20260716).
 
 from __future__ import annotations
 
-import hashlib
-import os
-import random
-import struct
-import subprocess
-import sys
-import unittest
+import hashlib, os, random, struct, subprocess, sys, unittest
 
-_here = os.path.dirname(os.path.abspath(__file__))
+_here = __file__.replace('\\', '/').rsplit('/', 1)[0]
 sys.path.insert(0, _here)                    # tests/ (sibling tests)
 sys.path.insert(0, os.path.dirname(_here))   # repo root (checkdisk)
-import checkdisk as ndf  # noqa: E402
+
+import checkdisk  # noqa: E402
 import tests as T  # noqa: E402  (image fixture + corruption fabricators)
+
 
 SEED = int(os.environ.get('CHECKDISK_CI_SEED', '20260716'))
 IMAGE_BYTES = 256 * 1024 * 1024
@@ -92,24 +87,24 @@ class HeavyPipelineTest(unittest.TestCase):
         # leaked $Bitmap bits (extra-only: marking used clusters free would let
         # the repair allocator overwrite live data — that direction is covered
         # by the quiescent unit test instead)
-        with ndf.RawVolume(img.path) as vol:
+        with checkdisk.RawVolume(img.path) as vol:
             nc = vol.nr_clusters()
-        T.patch_stream(img.path, ndf.FILE_BITMAP, ndf.AT_DATA, '',
+        T.patch_stream(img.path, checkdisk.FILE_BITMAP, checkdisk.AT_DATA, '',
                        nc // 8 - 32, b'\xff' * 4)
 
         # $Secure: corrupt one descriptor's primary copy (the $SDS mirror the
         # native engine repairs) AND a $SII root entry's security_id (the native
         # engine rebuilds $SII/$SDH from $SDS).
-        with ndf.RawVolume(img.path) as vol:
+        with checkdisk.RawVolume(img.path) as vol:
             chk = vol.secure_check()
             _sid, (_h, sds_off, _l) = sorted(chk['sds_entries'].items())[0]
-            sii_root = vol._read_whole_attr(ndf.FILE_SECURE, ndf.AT_INDEX_ROOT,
+            sii_root = vol._read_whole_attr(checkdisk.FILE_SECURE, checkdisk.AT_INDEX_ROOT,
                                             '$SII'.encode('utf-16-le'), 4)
         entry = 16 + struct.unpack_from('<I', sii_root, 16)[0]
         data_ofs = struct.unpack_from('<H', sii_root, entry)[0]
-        T.patch_stream(img.path, ndf.FILE_SECURE, ndf.AT_DATA, '$SDS',
+        T.patch_stream(img.path, checkdisk.FILE_SECURE, checkdisk.AT_DATA, '$SDS',
                        sds_off + 24, b'\xEE')
-        T.patch_stream(img.path, ndf.FILE_SECURE, ndf.AT_INDEX_ROOT, '$SII',
+        T.patch_stream(img.path, checkdisk.FILE_SECURE, checkdisk.AT_INDEX_ROOT, '$SII',
                        entry + data_ofs + 4, struct.pack('<I', 0xDEAD))
 
         # -- dry run: everything is found, nothing is written --
@@ -137,7 +132,7 @@ class HeavyPipelineTest(unittest.TestCase):
         proc = self._cli('/f', img.path)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
-        with ndf.RawVolume(img.path) as v:
+        with checkdisk.RawVolume(img.path) as v:
             listing = {}          # dir rel -> {name: record}
             for rel, want in canaries.items():
                 d, name = rel.rsplit('/', 1)
@@ -147,14 +142,14 @@ class HeavyPipelineTest(unittest.TestCase):
                                   if e['status'] == 'ok'}
                 self.assertIn(name, listing[d], f'canary missing: {rel}')
                 got = hashlib.md5(bytes(
-                    v._attr_value(listing[d][name], ndf.AT_DATA, None))).hexdigest()
+                    v._attr_value(listing[d][name], checkdisk.AT_DATA, None))).hexdigest()
                 self.assertEqual(got, want, f'canary corrupted: {rel}')
             self.assertEqual(
                 sorted(e['name'] for e in v.scan_dir('/teardir')
                        if e['status'] != 'dir-self' and e['name'] != 'subdir'),
                 teardir_expected)
             e = next(x for x in v.scan_dir('/dirTT') if x['name'] == 'toorn.bin')
-            self.assertEqual(v._attr_value(e['record'], ndf.AT_DATA, None), b'')
+            self.assertEqual(v._attr_value(e['record'], checkdisk.AT_DATA, None), b'')
             for cls in ('orphan', 'gone'):
                 for parent, name in victims[cls]:
                     names = {x['name'] for x in v.scan_dir('/' + parent)}
@@ -193,8 +188,8 @@ class MetadataFuzzTest(unittest.TestCase):
                 fh.write(blob)
 
             try:
-                vol = ndf.RawVolume(img.path)
-            except (ndf.NtfsError, OSError):
+                vol = checkdisk.RawVolume(img.path)
+            except (checkdisk.NtfsError, OSError):
                 continue                     # refusing to mount is acceptable
             try:
                 for op, fn in (
@@ -209,7 +204,7 @@ class MetadataFuzzTest(unittest.TestCase):
                             if e['status'] != 'dir-self'))):
                     try:
                         fn()
-                    except (ndf.NtfsError, OSError):
+                    except (checkdisk.NtfsError, OSError):
                         pass                 # clean refusal is fine
             finally:
                 vol.close()

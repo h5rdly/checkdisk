@@ -132,3 +132,59 @@ predates modern Unicode: characters that gained uppercase mappings later map
 to *themselves* on real volumes, and the iota-subscript vocalics map to their
 titlecase forms.
 
+
+## The journals
+
+- **`$LogFile`** is a metadata write-ahead log. This tool — like chkdsk —
+  **resets it rather than replaying it** (`reset_logfile` fills it with
+  `0xFF`): the structural checks reconcile the on-disk state directly, which
+  makes replay redundant, and a reset log is unambiguously clean.
+- The **dirty bit** lives in `$Volume`'s `$VOLUME_INFORMATION` (flags bit 0).
+  The write engine *sets it on open and clears it on clean close*
+  (`RawVolumeRW.__init__`/`close`) so that a crash mid-repair leaves the
+  volume flagged for a full check — the same discipline the driver uses.
+- **`$UsnJrnl`** (`\$Extend\$UsnJrnl`) is the *user-visible* change journal:
+  `$Max` (32 bytes: max size, allocation delta, journal id, LowestValidUsn)
+  and `$J`, an append-only sparse stream whose **byte offset is the USN**.
+  Old content is punched out with sparse holes, so the file's allocated tail
+  is the live window. Each V2 record self-states its USN at offset 24 — it
+  must equal the record's own position (`_walk_usn_records`).
+
+### What `$LogFile` replay actually does (research)
+
+The `$LogFile` is an LFS (Log File Service) circular log of two page kinds: the
+first two 4 KiB pages are **restart pages** (`RSTR`) holding a checkpoint pointer
+plus per-client state; the rest are **record pages** (`RCRD`) carrying the log
+records. A driver's crash recovery is three passes from the last checkpoint:
+
+- **restart selection** — take the restart page with the higher `current_lsn`;
+  the other is a stale backup (fall back to it if the newest checkpoint's own
+  pages never reached the disk).
+- **analysis** — rebuild the transaction / dirty-page / open-attribute tables
+  from the checkpoint's table dumps, walking records forward to find `redo_lsn`,
+  the oldest LSN any still-dirty page needs.
+- **redo** — from `redo_lsn`, re-apply each committed op whose target page is
+  older than the record (`page_lsn < record_lsn`, the LSN gate; a page already
+  past the change is skipped).
+- **undo** — roll back ops of transactions that never committed, walking each
+  transaction's undo-next chain backward.
+
+The load-bearing subtlety, learned building a replayer validated chkdsk-clean on
+a real Windows crash: **NTFS logs multi-sector-protected pages (FILE records,
+INDX blocks) in *logical* form — the update-sequence fixup is NOT applied.** In a
+logged page image the sector tails hold the real data, not the USN; sealing is a
+flush-time concern. So a redo that lays down a fresh INDX block writes a logical
+page, and a *later* redo against it must accept that logical form (its fixup
+check 'fails' because tails ≠ USN — expected, not a torn page) and re-seal only
+on write-back. A replayer that demands a sealed on-disk block at every step
+silently drops those ops. Two more traps: the **v2 log relocates the record-page
+header** — its logical file offset is at 0x3C and last-end LSN at 0x20, so the
+0x18 "first free byte" field some parsers read is v1-shaped and truncates a v2
+walk; and a **dry run applies nothing** (redo/undo only run when you commit), so
+"zero ops applied" can just mean you didn't ask.
+
+Why this tool still **resets** rather than replays: the structural checks
+reconcile the on-disk state directly, so replay yields no repair the passes
+don't already achieve, and an all-`0xFF` log is unambiguously clean to the next
+mount. A genuine redo/undo engine (`replay.py`) that *does* produce a
+chkdsk-clean volume is kept as research, not the repair path.

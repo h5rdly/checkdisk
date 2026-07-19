@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 '''Tests for the native $LogFile replay engine (replay.py).
 
 Replay is research, not the shipped repair path: checkdisk *resets* the log
@@ -24,19 +23,16 @@ replayed volume is clean (reusing win_github_ci's VHD + chkdsk harness).
 
 from __future__ import annotations
 
-import gzip
-import hashlib
-import os
-import shutil
-import sys
-import tempfile
+import gzip, hashlib, os, shutil, subprocess, sys, tempfile
 import unittest
 
-_here = os.path.dirname(os.path.abspath(__file__))
+_here = __file__.replace('\\', '/').rsplit('/', 1)[0]
 sys.path.insert(0, _here)                    # tests/
 sys.path.insert(0, os.path.dirname(_here))   # repo root (checkdisk / replay)
-import checkdisk as ndf   # noqa: E402
+
+import checkdisk          # noqa: E402
 import replay             # noqa: E402
+
 
 FIXTURE = os.path.join(_here, 'fixtures', 'dirty-big-win.img.gz')
 
@@ -89,7 +85,7 @@ class ReplayEngineTests(unittest.TestCase):
 
     def test_replayed_volume_still_parses(self) -> None:
         replay.replay(self.img, really=True)
-        with ndf.RawVolume(self.img) as v:
+        with checkdisk.RawVolume(self.img) as v:
             roots = [e['name'] for e in v.scan_dir('/') if e['status'] != 'dir-self']
         self.assertGreater(len(roots), 0, 'root directory unreadable after replay')
 
