@@ -1,6 +1,6 @@
 # checkdisk
 
-A self-contained, pure-Python NTFS repair tool — the parts of chkdsk `/f` that matter for a crashed volume (dangling dirents, torn indexes, 
+A self-contained, pure-Python NTFS repair tool — the parts of `chkdsk /f` that matter for a crashed volume (dangling dirents, torn indexes, 
 lost files, torn truncates, `$Bitmap`, `$Secure`, the USN journal). 
 
 `checkdisk` uses a native read/write engine that parses and rewrites on-disk NTFS structures directly, with multi-sector fixups and plan-then-commit 
